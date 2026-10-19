@@ -1,0 +1,27 @@
+spring:
+  application:
+    name: mcp-gate-of-truth
+  ai:
+    mcp:
+      client:
+        enabled: true
+        name: gate-of-truth-client
+        version: 0.0.1
+        type: SYNC
+        request-timeout: 60s
+        toolcallback:
+          enabled: false
+        stdio:
+          connections:
+            notion:
+              command: /home/thorugo/.nvm/versions/node/v24.21.0/bin/npx
+              args:
+                - "-y"
+                - "@notionhq/notion-mcp-server"
+              env:
+                NOTION_TOKEN: ${NOTION_TOKEN}
+                PATH: /home/thorugo/.nvm/versions/node/v24.21.0/bin:/usr/local/bin:/usr/bin:/bin
+      server:
+        name: MCP Gate of Truth
+        version: 0.0.1
+        protocol: STREAMABLE
