@@ -1,6 +1,7 @@
 package io.github.thorugo28.mcp_gate_of_truth.upstream;
 
 import java.util.List;
+import java.util.Map;
 
 import io.modelcontextprotocol.client.McpSyncClient;
 import io.modelcontextprotocol.spec.McpSchema;
@@ -18,19 +19,20 @@ public class UpstreamToolsLogger {
 
 	private static final Logger log = LoggerFactory.getLogger(UpstreamToolsLogger.class);
 
-	private final List<McpSyncClient> clients;
+	private final UpstreamRegistry registry;
 
-	public UpstreamToolsLogger(List<McpSyncClient> clients) {
-		this.clients = clients;
+	public UpstreamToolsLogger(UpstreamRegistry registry) {
+		this.registry = registry;
 	}
 
 	@EventListener(ApplicationReadyEvent.class)
 	public void logTools() {
-		log.info("{} upstream(s) conectado(s)", clients.size());
-		for (McpSyncClient client : clients) {
-			String server = client.getServerInfo().name();
+		log.info("{} upstream(s) conectado(s)", registry.clients().size());
+		for (Map.Entry<String, McpSyncClient> entry : registry.clients().entrySet()) {
+			McpSyncClient client = entry.getValue();
 			List<McpSchema.Tool> tools = client.listTools().tools();
-			log.info("Upstream '{}': {} tool(s)", server, tools.size());
+			log.info("Upstream '{}' (clientInfo '{}', servidor '{}'): {} tool(s)", entry.getKey(),
+					client.getClientInfo().name(), client.getServerInfo().name(), tools.size());
 			tools.forEach(tool -> log.info("  - {}", tool.name()));
 		}
 	}

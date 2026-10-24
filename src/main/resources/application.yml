@@ -14,13 +14,21 @@ spring:
         stdio:
           connections:
             notion:
-              command: /home/thorugo/.nvm/versions/node/v24.21.0/bin/npx
+              command: ${NPX_CMD:npx}
               args:
                 - "-y"
                 - "@notionhq/notion-mcp-server"
               env:
                 NOTION_TOKEN: ${NOTION_TOKEN}
-                PATH: /home/thorugo/.nvm/versions/node/v24.21.0/bin:/usr/local/bin:/usr/bin:/bin
+                PATH: ${NODE_BIN:/usr/bin}:${PATH}
+            filesystem:
+              command: ${NPX_CMD:npx}
+              args:
+                - "-y"
+                - "@modelcontextprotocol/server-filesystem"
+                - "${MCP_SANDBOX_DIR:${user.home}/mcp-sandbox}"
+              env:
+                PATH: ${NODE_BIN:/usr/bin}:${PATH}
       server:
         name: MCP Gate of Truth
         version: 0.0.1
