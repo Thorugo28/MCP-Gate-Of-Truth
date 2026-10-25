@@ -44,7 +44,7 @@ public class ToolMirror {
 			McpSyncClient client = entry.getValue();
 			for (McpSchema.Tool tool : client.listTools().tools()) {
 				String exposedName = entry.getKey() + SEPARATOR + tool.name();
-				router.register(exposedName, client, tool.name());
+				router.register(exposedName, entry.getKey(), client, tool);
 				server.addTool(McpServerFeatures.SyncToolSpecification.builder()
 					.tool(withName(tool, exposedName))
 					.callHandler((exchange, request) -> router.call(request))
