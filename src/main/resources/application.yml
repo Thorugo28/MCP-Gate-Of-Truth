@@ -8,12 +8,12 @@ spring:
   ai:
     mcp:
       client:
-        enabled: true
+        # desligado: o gateway cria os clientes (UpstreamClientFactory) para conseguir reconectar; as propriedades abaixo
+        # (name, version, request-timeout e stdio.connections) continuam valendo
+        enabled: false
         name: gate-of-truth-client
         version: 0.0.1
         type: SYNC
-        # o UpstreamRegistry inicializa cada upstream separadamente, para um com problema não derrubar a subida
-        initialized: false
         request-timeout: 60s
         toolcallback:
           enabled: false

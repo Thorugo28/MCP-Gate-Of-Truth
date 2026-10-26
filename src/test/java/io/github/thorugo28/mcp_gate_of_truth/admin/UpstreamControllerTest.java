@@ -1,10 +1,12 @@
 package io.github.thorugo28.mcp_gate_of_truth.admin;
 
+import java.time.Instant;
 import java.util.List;
 import java.util.Map;
 
 import io.github.thorugo28.mcp_gate_of_truth.routing.ToolRouter;
 import io.github.thorugo28.mcp_gate_of_truth.upstream.UpstreamRegistry;
+import io.github.thorugo28.mcp_gate_of_truth.upstream.UpstreamState;
 import io.github.thorugo28.mcp_gate_of_truth.upstream.UpstreamStatus;
 import io.modelcontextprotocol.client.McpSyncClient;
 import io.modelcontextprotocol.spec.McpSchema;
@@ -36,8 +38,6 @@ class UpstreamControllerTest {
 
 	private final McpSyncClient up = mock(McpSyncClient.class);
 
-	private final McpSyncClient down = mock(McpSyncClient.class);
-
 	private final McpSchema.Tool readFile = McpSchema.Tool.builder()
 		.name("read_file")
 		.description("Lê um arquivo")
@@ -47,10 +47,10 @@ class UpstreamControllerTest {
 
 	@Test
 	void listsUpstreamsWithStatusAndToolCount() throws Exception {
-		given(registry.clients()).willReturn(Map.of("filesystem", up, "notion", down));
-		given(up.getServerInfo()).willReturn(new McpSchema.Implementation("secure-filesystem-server", "0.2.0"));
-		given(registry.status("filesystem")).willReturn(UpstreamStatus.UP);
-		given(registry.status("notion")).willReturn(UpstreamStatus.DOWN);
+		given(registry.states()).willReturn(List.of(
+				new UpstreamState("filesystem", UpstreamStatus.UP,
+						new McpSchema.Implementation("secure-filesystem-server", "0.2.0"), 0, null),
+				new UpstreamState("notion", UpstreamStatus.DOWN, null, 2, Instant.parse("2026-10-26T12:00:30Z"))));
 		given(router.routesOf("filesystem"))
 			.willReturn(List.of(new ToolRouter.Route("filesystem__read_file", "filesystem", up, readFile)));
 		given(router.routesOf("notion")).willReturn(List.of());
@@ -62,14 +62,18 @@ class UpstreamControllerTest {
 			.andExpect(jsonPath("$[?(@.key == 'filesystem')].serverVersion").value("0.2.0"))
 			.andExpect(jsonPath("$[?(@.key == 'filesystem')].status").value("UP"))
 			.andExpect(jsonPath("$[?(@.key == 'filesystem')].toolCount").value(1))
+			.andExpect(jsonPath("$[?(@.key == 'filesystem')].attempts").value(0))
+			.andExpect(jsonPath("$[?(@.key == 'filesystem')].nextRetryAt").value(contains(nullValue())))
 			.andExpect(jsonPath("$[?(@.key == 'notion')].status").value("DOWN"))
 			.andExpect(jsonPath("$[?(@.key == 'notion')].serverName").value(contains(nullValue())))
-			.andExpect(jsonPath("$[?(@.key == 'notion')].toolCount").value(0));
+			.andExpect(jsonPath("$[?(@.key == 'notion')].toolCount").value(0))
+			.andExpect(jsonPath("$[?(@.key == 'notion')].attempts").value(2))
+			.andExpect(jsonPath("$[?(@.key == 'notion')].nextRetryAt").value("2026-10-26T12:00:30Z"));
 	}
 
 	@Test
 	void listsToolsOfUpstream() throws Exception {
-		given(registry.clients()).willReturn(Map.of("filesystem", up));
+		given(registry.keys()).willReturn(List.of("filesystem", "notion"));
 		given(router.routesOf("filesystem"))
 			.willReturn(List.of(new ToolRouter.Route("filesystem__read_file", "filesystem", up, readFile)));
 
@@ -85,7 +89,7 @@ class UpstreamControllerTest {
 
 	@Test
 	void unknownUpstreamReturns404() throws Exception {
-		given(registry.clients()).willReturn(Map.of("filesystem", up));
+		given(registry.keys()).willReturn(List.of("filesystem", "notion"));
 
 		mvc.perform(get("/admin/upstreams/xpto/tools")).andExpect(status().isNotFound());
 	}

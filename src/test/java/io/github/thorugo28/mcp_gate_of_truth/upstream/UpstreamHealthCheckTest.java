@@ -1,6 +1,7 @@
 package io.github.thorugo28.mcp_gate_of_truth.upstream;
 
 import java.time.Duration;
+import java.util.List;
 import java.util.Map;
 
 import io.github.thorugo28.mcp_gate_of_truth.config.UpstreamProperties;
@@ -9,6 +10,7 @@ import org.junit.jupiter.api.Test;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.BDDMockito.given;
+import static org.mockito.BDDMockito.willThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -19,7 +21,7 @@ class UpstreamHealthCheckTest {
 
 	private final UpstreamHealthCheck healthCheck = new UpstreamHealthCheck(registry, new UpstreamExecutor(),
 			new UpstreamProperties(Duration.ofSeconds(1), Duration.ofMillis(300), Duration.ofSeconds(1),
-					Duration.ofSeconds(15)));
+					Duration.ofSeconds(15), Duration.ofSeconds(15), Duration.ofMinutes(5)));
 
 	@Test
 	void failingOrSlowPingMarksDownAndHealthyStaysUp() {
@@ -48,6 +50,27 @@ class UpstreamHealthCheckTest {
 		verify(registry).markDown("frozen1");
 		verify(registry).markDown("frozen2");
 		verify(registry, never()).markDown("filesystem");
+	}
+
+	@Test
+	void reconnectsUpstreamsWhoseTurnCame() {
+		given(registry.dueForReconnect()).willReturn(List.of("notion"));
+
+		healthCheck.checkAll();
+
+		verify(registry).reconnect("notion");
+	}
+
+	@Test
+	void unexpectedReconnectErrorDoesNotStopTheRound() {
+		McpSyncClient healthy = mock(McpSyncClient.class);
+		given(registry.connected()).willReturn(Map.of("filesystem", healthy));
+		given(registry.dueForReconnect()).willReturn(List.of("notion"));
+		willThrow(new IllegalStateException("bug")).given(registry).reconnect("notion");
+
+		healthCheck.checkAll();
+
+		verify(healthy).ping();
 	}
 
 }

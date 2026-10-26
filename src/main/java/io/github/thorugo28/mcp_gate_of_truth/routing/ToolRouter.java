@@ -63,6 +63,13 @@ public class ToolRouter {
 		return removed;
 	}
 
+	/**
+	 * Tira uma rota da tabela; devolve se ela existia.
+	 */
+	public boolean remove(String exposedName) {
+		return routes.remove(exposedName) != null;
+	}
+
 	public Optional<Route> find(String exposedName) {
 		return Optional.ofNullable(routes.get(exposedName));
 	}

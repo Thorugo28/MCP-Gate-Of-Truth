@@ -24,7 +24,7 @@ class ToolRouterTest {
 
 	private final ToolRouter router = new ToolRouter(new UpstreamExecutor(),
 			new UpstreamProperties(Duration.ofSeconds(1), Duration.ofSeconds(1), Duration.ofMillis(200),
-					Duration.ofSeconds(15)),
+					Duration.ofSeconds(15), Duration.ofSeconds(15), Duration.ofMinutes(5)),
 			registry);
 
 	private final McpSyncClient client = mock(McpSyncClient.class);
@@ -105,6 +105,15 @@ class ToolRouterTest {
 		assertThat(router.find("filesystem__read_file")).isPresent();
 		// dá para registrar de novo depois (reconexão)
 		router.register("notion__API-get-self", "notion", client, tool);
+	}
+
+	@Test
+	void removeTakesOutOneRoute() {
+		router.register("filesystem__read_file", "filesystem", client, tool);
+
+		assertThat(router.remove("filesystem__read_file")).isTrue();
+		assertThat(router.remove("filesystem__read_file")).isFalse();
+		assertThat(router.find("filesystem__read_file")).isEmpty();
 	}
 
 }

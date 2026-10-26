@@ -27,9 +27,8 @@ public class UpstreamToolsLogger {
 
 	@EventListener(ApplicationReadyEvent.class)
 	public void logTools() {
-		log.info("{} de {} upstream(s) conectado(s)", registry.connected().size(), registry.clients().size());
-		registry.clients()
-			.keySet()
+		log.info("{} de {} upstream(s) conectado(s)", registry.connected().size(), registry.keys().size());
+		registry.keys()
 			.stream()
 			.filter(key -> !registry.connected().containsKey(key))
 			.forEach(key -> log.warn("Upstream '{}' DOWN, sem tools", key));

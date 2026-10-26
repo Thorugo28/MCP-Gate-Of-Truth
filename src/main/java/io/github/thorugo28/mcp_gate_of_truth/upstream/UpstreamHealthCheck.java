@@ -14,8 +14,8 @@ import org.springframework.scheduling.config.ScheduledTaskRegistrar;
 import org.springframework.stereotype.Component;
 
 /**
- * A cada {@code gate.upstreams.health-interval}, pinga cada upstream conectado (em paralelo, cada um com o ping-timeout).
- * Ping que falha ou estoura o prazo derruba o upstream no {@link UpstreamRegistry}.
+ * A cada {@code gate.upstreams.health-interval}, pinga cada upstream conectado (em paralelo, cada um com o ping-timeout) e
+ * tenta reconectar os DOWN cuja vez chegou. Ping que falha ou estoura o prazo derruba o upstream no {@link UpstreamRegistry}.
  */
 @Component
 public class UpstreamHealthCheck implements SchedulingConfigurer {
@@ -41,9 +41,10 @@ public class UpstreamHealthCheck implements SchedulingConfigurer {
 	}
 
 	void checkAll() {
-		// um upstream travado não atrasa o ping dos outros; o close() espera todos terminarem
-		try (ExecutorService pings = Executors.newVirtualThreadPerTaskExecutor()) {
-			registry.connected().forEach((key, client) -> pings.submit(() -> check(key, client)));
+		// um upstream travado não atrasa os outros; o close() espera todos terminarem, então as rodadas não se sobrepõem
+		try (ExecutorService tasks = Executors.newVirtualThreadPerTaskExecutor()) {
+			registry.connected().forEach((key, client) -> tasks.submit(() -> check(key, client)));
+			registry.dueForReconnect().forEach(key -> tasks.submit(() -> reconnect(key)));
 		}
 	}
 
@@ -58,6 +59,16 @@ public class UpstreamHealthCheck implements SchedulingConfigurer {
 		catch (RuntimeException ex) {
 			log.warn("Ping no upstream '{}' falhou: {}", key, ex.getMessage());
 			registry.markDown(key);
+		}
+	}
+
+	private void reconnect(String key) {
+		try {
+			registry.reconnect(key);
+		}
+		catch (RuntimeException ex) {
+			// a falha normal (handshake) já é tratada no registry; aqui só o inesperado, para não perder a rodada
+			log.error("Erro inesperado reconectando o upstream '{}'", key, ex);
 		}
 	}
 
