@@ -8,7 +8,9 @@ Gateway MCP agregador em Java/Spring, inspirado no Bifrost (Maxim AI).
 ## Stack e decisões fixas (não mudar sem conversar)
 - Spring Boot 4.1.x + Spring AI 2.0 (MCP Java SDK 2.0, spec MCP 2025-11-25). Maven, versões pelo BOM do Spring AI.
 - Transporte: WebMVC + Streamable HTTP (`spring-ai-starter-mcp-server-webmvc`, não o starter STDIO).
-- Cliente: `spring-ai-starter-mcp-client`, modo SYNC (`McpSyncClient` / `McpSyncServer`).
+- Cliente: `spring-ai-starter-mcp-client`, modo SYNC (`McpSyncClient` / `McpSyncServer`). Desde a fase 3, passo 4 (2026-10-26),
+  o autoconfig do cliente fica desligado (`spring.ai.mcp.client.enabled: false`) e o gateway cria os clientes na
+  `upstream/UpstreamClientFactory`, lendo as mesmas propriedades do yml; o starter fica pelas classes (SDK e propriedades).
 - Tools dos upstreams registradas programaticamente em tempo de execução, nunca via `@Tool`.
 - `spring.ai.mcp.client.toolcallback.enabled: false`: o atalho automático do Spring AI fica desligado de propósito.
 - Sem starter de modelo (OpenAI/Anthropic).
@@ -29,9 +31,11 @@ io.github.thorugo28.mcpgateoftruth   (confira o nome exato do último segmento)
 ├── proxy/      o que o gateway expõe no /mcp (ex.: ToolMirror registra as tools no McpSyncServer e repassa o callTool)
 ├── routing/    ToolRouter: tabela nome exposto → (cliente, nome original) e o call
 ├── admin/      API REST /admin para o painel: controllers finos e DTOs (records)
+├── security/   fase 4: chaves de acesso, filtro de autenticação e regras de quem vê qual tool
 └── config/     @ConfigurationProperties e beans
 ```
-- Fases futuras viram pacotes novos: `security/` (API key/OAuth), `audit/` (logs e métricas).
+- Fases futuras viram pacotes novos: `audit/` (logs e métricas).
+- `security` não depende de `admin` nem de `proxy`; `routing` e `proxy` perguntam a `security` se a chave pode usar uma tool.
 - `proxy` depende de `upstream`, nunca o contrário.
 - `admin` só lê de `upstream` e `routing` (e chama tools pelo `ToolRouter`); nada depende de `admin`.
 - Sem interfaces antes de existir uma segunda implementação; com um upstream só, classes concretas.
@@ -86,10 +90,10 @@ O `/mcp` não serve para o front: é JSON-RPC com sessão e SSE, feito para clie
 Pronto quando: o Angular lista os upstreams, mostra as tools de cada um e chama uma tool pelo playground, tudo com dados reais.
 
 Contrato (JSON; DTOs como `record` em `admin/`):
-- `GET /admin/upstreams` → `[{ "key", "serverName", "serverVersion", "status", "toolCount" }]`
+- `GET /admin/upstreams` → `[{ "key", "serverName", "serverVersion", "status", "toolCount", "attempts", "nextRetryAt" }]`
+  (fase 3: `status` vem do health check; `attempts` e `nextRetryAt` ISO-8601 UTC só em DOWN, com `serverName`/`serverVersion` `null`)
   - `key`: chave do yml (do `UpstreamRegistry`). `serverName`/`serverVersion`: `client.getServerInfo()`.
-  - `status`: `"UP"` ou `"DOWN"`, por enquanto com base em `client.ping()`. Atenção: o ping usa o `request-timeout` (60s);
-    se um upstream travar, a tela trava junto. Aceitável agora; timeout curto e status de verdade são fase 3.
+  - `status`: `"UP"` ou `"DOWN"`, lido do `UpstreamRegistry` (atualizado pelo health check da fase 3); não pinga na requisição.
 - `GET /admin/upstreams/{key}/tools` → `[{ "name", "originalName", "description", "inputSchema" }]`
   - `name` é o nome exposto (com prefixo), `originalName` o do upstream. `inputSchema` vai como veio (JSON Schema).
   - `key` desconhecida → 404.
@@ -123,7 +127,7 @@ Cuidados:
   a lista de rotas ou o `Tool` original), acrescentar um método lá, não duplicar estado em `admin/`.
 - Nada de ligar/desligar tools, cadastrar upstreams ou API keys aqui: isso é etapa B, depois da fase 4.
 
-## Estado atual: fase 3, resiliência
+## Concluído: fase 3, resiliência (2026-10-26)
 Objetivo: um upstream com problema não derruba nem trava o gateway; quando ele volta, as tools voltam sozinhas.
 Pronto quando: com o gateway no ar, `pkill -f notion-mcp-server` → o filesystem continua respondendo pelo `/mcp`, o painel mostra
 `notion` como `DOWN` e o `tools/list` cai para 14; depois, sem reiniciar o gateway, o Notion volta e as 24 tools reaparecem.
@@ -207,27 +211,179 @@ Passos:
    ping-timeout inteiro. Detecção = até health-interval + ping-timeout: com o padrão de 60s deu 61s; com
    `--gate.upstreams.ping-timeout=3s`, 17,8s. Decidido em 2026-10-26: padrões `ping-timeout: 3s` e `health-interval: 10s`
    (pior caso ~13s); `init-timeout` 20s e `call-timeout` 60s continuam. Com os padrões novos: DOWN em 12,1s, 14 tools.
-4. ⬜ Reconexão. Upstream `DOWN` é tentado de novo com backoff (ex.: 15s, 30s, 60s, teto de 5 min). Ao conectar, as tools são
+4. ✅ Reconexão. Upstream `DOWN` é tentado de novo com backoff (ex.: 15s, 30s, 60s, teto de 5 min). Ao conectar, as tools são
    registradas de novo (no `McpSyncServer` e no `ToolRouter`) e o status volta a `UP`. Depende do que o passo 0b mostrar.
    Pronto quando: depois do `pkill`, o gateway sobe o `npx` de novo sozinho e as 24 tools do Notion reaparecem sem reiniciar.
-5. ⬜ Repasse do `list_changed` dos upstreams. Quando um upstream avisar que a lista mudou, sincronizar só as tools dele:
+   Decidido (2026-10-26): plano B completo, sem status `RECONNECTING`, tentativas infinitas com teto.
+   Feito: `spring.ai.mcp.client.enabled: false`; `config/UpstreamClientConfig` liga `McpStdioClientProperties` e
+   `McpClientCommonProperties` do Spring AI e um `Clock`. `upstream/UpstreamClientFactory` cria cliente novo por chave com a
+   receita do Spring AI (clientInfo `"<name> - <chave>"`, title, request-timeout) + init-timeout; chaves em ordem alfabética.
+   O `UpstreamRegistry` não lê mais o clientInfo: tem `keys()`, `connected()` (UP) e um `Retry(attempts, nextAt)` por DOWN.
+   `reconnect(key)` cria cliente novo; deu certo → UP + `UpstreamUpEvent` (o `ToolMirror` lista e registra as tools; se falhar,
+   `markDown` de novo); falhou → fecha o cliente e dobra a espera. Espera: `gate.upstreams.reconnect-initial-delay` (15s)
+   × 2^tentativas, teto `reconnect-max-delay` (5m). Zera ao reconectar. Upstream DOWN desde a subida entra no mesmo ciclo.
+   O health check faz pings e reconexões na mesma rodada, uma tarefa por upstream; como a rodada espera todas e o atraso é
+   fixo, as transições de um upstream nunca correm juntas.
+   `/admin/upstreams` ganhou `attempts` e `nextRetryAt` (null em UP), lidos de `registry.states()`.
+   Testado na 8081 (matando só os filhos do java da porta): DOWN em 9s, de volta UP 22s depois (15s arredondado para a rodada
+   + handshake), 24 tools, `tools/list` 38, 48 `list_changed` (24 saindo, 24 voltando), chamada ao Notion chega à API.
+   Regressão do passo 1 com pacote inexistente (`--gate.upstreams.init-timeout=3s`): sobe, filesystem ok, tentativas a cada
+   30s e 60s, `attempts` subindo no painel, nenhum processo sobra.
+   Atenção para o passo 5: com o autoconfig desligado, o `McpToolsChangedEvent` do Spring AI (item 0d) não existe mais;
+   o `toolsChangeConsumer` tem que ser ligado na `UpstreamClientFactory`.
+5. ✅ Repasse do `list_changed` dos upstreams. Quando um upstream avisar que a lista mudou, sincronizar só as tools dele:
    remover as que sumiram, adicionar as novas, manter as iguais. O filesystem anuncia `listChanged=true`.
    Pronto quando: teste unitário da sincronização (lista antiga × lista nova) passando; teste manual se der para provocar o aviso.
+   Feito: a `UpstreamClientFactory` liga `toolsChangeConsumer` → `upstream/UpstreamToolsChangedEvent(key, tools)` (o SDK já
+   rebusca a lista inteira e chama o consumer numa thread do `boundedElastic`). `proxy/ToolDiff` (função pura) separa removidas,
+   novas e alteradas (mesmo nome, `Tool` diferente) pelos nomes originais. O `ToolMirror` aplica só a diferença num método
+   `apply` usado pela subida, pela reconexão e pelo aviso, o que torna os três idempotentes (um aviso no meio de uma
+   reconexão não registra nada duas vezes); alterada = `router.remove` + `register` e `addTool`, que substitui no servidor
+   (WARN "Replace existing Tool" esperado). Aviso de upstream DOWN é ignorado. Os métodos do `ToolMirror` que mexem nas tools
+   são `synchronized`, porque os eventos chegam do health check e das threads dos clientes. `ToolRouter.remove(nome)` novo.
+   Testes: `ToolDiffTest` (o unitário pedido) e `ToolMirrorTest` com `ToolRouter` de verdade.
+   Teste manual: servidor MCP mínimo em Node (sem dependências) como upstream extra `dyn` pela linha de comando
+   (`--spring.ai.mcp.client.stdio.connections.dyn.command=<node>` e `.args=<script>`), que 15s depois do handshake troca
+   alpha+beta por beta(v2)+gamma e manda `list_changed`. Resultado: `-1 +1 ~1`, `dyn__alpha` some (404), `dyn__beta` com a
+   descrição nova, `dyn__gamma` responde, 3 `list_changed` para o cliente do gateway.
 
 Cuidados:
 - O estado de cada upstream (cliente, status, tentativas) muda numa thread de agendamento enquanto chamadas chegam em outras:
   usar estruturas thread-safe e não registrar a mesma tool duas vezes (o `register` do `ToolRouter` falha com nome repetido).
 - Chamada para upstream `DOWN` que ainda chegue ao router: `CallToolResult` com `isError: true` e uma mensagem clara
   ("upstream notion indisponível"), nunca exceção.
-- O status passa a ter três valores possíveis se fizer sentido (ex.: `UP`, `DOWN`, `RECONNECTING`); se mudar, o contrato do
-  `/admin` muda junto e o front precisa saber.
+- Status ficou só `UP`/`DOWN` (decidido em 2026-10-26); a reconexão aparece em `attempts` e `nextRetryAt`.
 - Fora da fase 3: autenticação, filtro de tools e métricas.
 
+## Estado atual: fase 4, controle de acesso (API key)
+Objetivo: ninguém chama o gateway sem chave, e cada chave só vê e só chama as tools liberadas para ela.
+Hoje qualquer processo na máquina chama qualquer tool (inclusive `write_file` e `API-post-page`), pelo `/mcp` e pelo `/admin`.
+Pronto quando: sem chave, `/mcp` e `/admin` dão 401; duas chaves diferentes veem listas de tools diferentes no `tools/list`
+e uma não consegue chamar a tool que não vê; o Claude Code e o painel funcionam com as suas chaves.
+
+Decidido (2026-10-26): chaves no `application.yml`, valor sempre de variável de ambiente (igual ao `NOTION_TOKEN`); sem banco.
+Cadastro de chaves pelo painel é etapa B. OAuth fica para depois desta fase (próxima seção do roadmap).
+
+Configuração proposta (`config/SecurityProperties`, prefixo `gate.security`):
+```yaml
+gate:
+  security:
+    keys:
+      cli:                          # nome da chave: aparece em log (e na auditoria da fase 5), nunca o valor
+        value: ${GATE_KEY_CLI}
+        upstreams: ["*"]            # "*" = todos; ou lista de chaves de upstream, ex.: ["filesystem"]
+        admin: false                # pode usar o /admin?
+      painel:
+        value: ${GATE_KEY_PANEL}
+        upstreams: ["*"]
+        admin: true
+```
+Header: `Authorization: Bearer <valor>` nos dois caminhos (casa com o OAuth depois). Gerar valores com `openssl rand -hex 32`.
+
+Passos:
+0. ✅ Investigar antes de codar (ler código e docs; anotar aqui o que achar):
+   a) O spring-ai-community/mcp-security tem suporte a API key? Qual header e formato de chave, como as chaves são buscadas
+      (interface de repositório que dá para implementar lendo o yml?), e se funciona com Spring Boot 4.1 / Spring AI 2.0.
+      Se não servir para API key, usar Spring Security puro (um filtro em `security/`) e deixar o mcp-security para o OAuth.
+   b) Como a identidade da chave chega ao handler da tool no `/mcp` (`McpTransportContext`, `SecurityContext`, outro?).
+      Cuidado: o `UpstreamExecutor` roda a chamada numa virtual thread; o `SecurityContext` não vai junto sozinho.
+   c) **A decisão grande:** dá para filtrar o `tools/list` por chave no SDK 2.0? O `McpSyncServer` tem uma lista de tools só,
+      igual para todas as sessões. Procurar um gancho por sessão/requisição. Se não houver, listar as opções
+      (ex.: filtrar só no `tools/call` e aceitar a lista cheia; um servidor por chave; interceptar a resposta) e conversar antes do passo 4.
+   Feito (2026-10-26), lido nas fontes do MCP SDK 2.0.0, do Spring AI 2.0.1 e do mcp-security (main, 0.1.14 no Central):
+   a) Tem API key, só para WebMVC. Versão 0.1.x = Spring AI 2.0 (o pom da main usa Boot 4.1.0 e Spring AI 2.0.0); 0.0.6 era a do 1.1.
+      Como funciona (`McpApiKeyConfigurer` dentro do `HttpSecurity`): header `X-API-Key` (dá para trocar o nome, ou passar um
+      `AuthenticationConverter` próprio para ler `Authorization: Bearer`), valor no formato `<id>.<segredo>`. As chaves vêm de um
+      `ApiKeyEntityRepository.findByKeyId(id)` (dá para implementar lendo o yml; tem um `InMemoryApiKeyEntityRepository`).
+      O segredo é conferido por um `DelegatingPasswordEncoder` fixo: o valor guardado tem que ser `{bcrypt}...` (caro, roda a cada
+      POST do `/mcp`, a própria doc avisa) ou `{noop}...` (comparação com `equals`, não é tempo constante). O configurer não deixa
+      trocar o encoder. O 401 sai sem `WWW-Authenticate` (`HttpStatusEntryPoint`). Bônus: `sessionBinding()` amarra o
+      `Mcp-Session-Id` à chave que abriu a sessão (boa prática da spec), e ele ignora CSRF quando há chave.
+      Conclusão: serve, mas obriga o formato `<id>.<segredo>` e bcrypt/noop. Alternativa: Spring Security puro com um filtro
+      nosso em `security/` (Bearer, `MessageDigest.isEqual`, formato do yml acima), deixando o mcp-security para o OAuth (4b).
+   b) Dois caminhos até o handler da tool:
+      - `SecurityContextHolder`: o Spring AI liga `immediateExecution(true)` no servidor SYNC em servlet, e o transporte WebMVC
+        roda o pedido com `.block()` na thread da requisição; o handler não pula para o `boundedElastic`, então o contexto do
+        filtro está lá (é o que faz o `@PreAuthorize` do mcp-security funcionar). Só é preciso ler **antes** do `UpstreamExecutor`,
+        que troca de thread.
+      - `McpTransportContext`: `exchange.transportContext()` no handler, preenchido por um `McpTransportContextExtractor<ServerRequest>`
+        no builder do `WebMvcStreamableServerTransportProvider`. O Spring AI monta o provider sem extractor (contexto vazio);
+        para usar, é preciso declarar o bean do provider (`@ConditionalOnMissingBean`). Mais explícito, não depende de thread.
+   c) **Não dá no servidor único.** O handler do `tools/list` é fixo dentro do `McpAsyncServer`
+      (`this.tools.stream().map(...::tool)`, sem filtro, sem olhar a sessão nem o contexto), o mapa de handlers é montado no
+      construtor e o builder não tem opção de filtro. Também o `list_changed` vai para todas as sessões (`notifyClients`).
+      Opções:
+      1) Lista cheia, filtro só no `tools/call`. Pouco código, mas não cumpre o "Pronto quando" (as duas chaves veem a mesma lista)
+         e o cliente descobre as tools proibidas.
+      2) Um `McpSyncServer` por chave. Cada chave tem o seu servidor e o seu `WebMvcStreamableServerTransportProvider` (builder
+         público), e um `RouterFunction` nosso em `/mcp` repassa o pedido para o provider da chave autenticada. O `ToolMirror`
+         põe cada tool só nos servidores das chaves que liberam aquele upstream. Ganha de graça: `tools/list` filtrado pelo
+         próprio SDK, `tools/call` de tool fora da chave dá o mesmo `-32602 Unknown tool` de tool inexistente, `list_changed`
+         só para as sessões que veem a tool, e sessão de uma chave usada com outra dá 404 (o provider não conhece o id).
+         Custo: desligar o servidor do Spring AI (`spring.ai.mcp.server.enabled: false`) e montar os servidores na mão, igual
+         ao que a fase 3 fez com os clientes; o `ToolMirror` passa a mexer em N servidores. Chaves vêm do yml, então N é fixo.
+      3) Filtro de servlet reescrevendo a resposta SSE do `tools/list`. Frágil (ler o corpo antes, bufferizar SSE, parsear JSON-RPC).
+      Reflexão no mapa de handlers do SDK: descartado.
+   **Decidido (2026-10-26):**
+   - Filtro: opção 2, **um `McpSyncServer` por chave** (nunca por "perfil": juntar chaves com os mesmos upstreams perde o
+     isolamento de sessão). Cada servidor guarda as próprias sessões, então sessão aberta com uma chave e usada com outra dá 404
+     sem amarrar o `Mcp-Session-Id` na mão (o que o mcp-security tinha de melhor vem de graça).
+     Os servidores são montados na mão e anunciam **só a capacidade de tools** (fecha a nota antiga de "Notas para depois").
+     Cada servidor guarda o nome da sua chave: na auditoria (fase 5), "quem chamou" é o servidor por onde a chamada passou.
+   - Autenticação: **Spring Security puro** com um filtro nosso em `security/` (`Authorization: Bearer`, `MessageDigest.isEqual`,
+     formato do yml acima). O mcp-security fica para o OAuth (4b).
+   - O 0b deixa de ser necessário (o handler não precisa saber quem chamou), mas vale para a fase 5: o `SecurityContext` está na
+     thread da requisição e tem que ser lido antes do `UpstreamExecutor`.
+   - O `/admin` não muda: não passa pelos servidores MCP, chama o `ToolRouter` direto, e a chave `admin: true` vê tudo.
+1. ✅ Protótipo do roteador (a parte mais arriscada; antes de mexer no `ToolMirror`). Dois `McpSyncServer`, cada um com o seu
+   `WebMvcStreamableServerTransportProvider`, atrás de um `RouterFunction` nosso que escolhe o servidor pela chave do header.
+   Os transportes do SDK registram a rota num caminho fixo; N servidores no mesmo `/mcp` não podem registrar a rota cada um.
+   Provar com 2 chaves: `initialize`, `tools/list` diferente por chave, stream SSE do GET aberto, `list_changed` chegando só no
+   cliente da chave certa, e sessão de uma chave usada com outra dando 404.
+   Pronto quando: os itens acima passam por curl; se o encaminhamento brigar com o SSE, é aqui que se descobre (e conversar).
+   Feito (2026-10-26): `proxy/RouterPrototype` (descartável, liga com `--gate.prototype.router.enabled=true` e
+   `--gate.prototype.router.keys.<nome>=<valor>`), em `/mcp-proto` ao lado do `/mcp` do Spring AI.
+   Não foi preciso caminho interno: cada `WebMvcStreamableServerTransportProvider` é montado com o mesmo `mcpEndpoint`, mas a
+   rota dele **nunca vira bean**; só o nosso `RouterFunction` existe, escolhe o transporte pela chave e chama
+   `transport.getRouterFunction().route(request)` e `handle(request)`. O `ServerResponse.sse` volta pelo nosso handler e o
+   Spring escreve normalmente (SSE do POST e stream do GET funcionam).
+   Testado na 8081 com chaves `a` e `b` (uma tool `echo_<chave>` em cada; `POST /mcp-proto/_toggle/<chave>` liga/desliga uma extra):
+   `tools/list` diferente por chave; `echo_a` chamada com `b` → `-32602 Unknown tool`; `list_changed` chegou só no stream GET da
+   chave que mudou (e nada no da outra); sessão de `a` com chave `b` → 404 no POST e no GET; sem chave ou chave errada → 401;
+   DELETE da sessão → 200; o `/mcp` do Spring AI continuou respondendo ao lado.
+   Achado: o `McpAsyncServer` força `logging` nas capacidades (`.mutate().logging()` no construtor). Anunciamos `tools` e
+   `logging`; resources, prompts e completions saem.
+2. ⬜ Chaves na configuração. `gate.security.keys` lido na subida; falha a subida se um `value` estiver vazio ou repetido.
+   O valor nunca aparece em log, em `toString()` nem em resposta do `/admin`. Comparação em tempo constante (`MessageDigest.isEqual`).
+   Pronto quando: subir sem `GATE_KEY_CLI` definida falha com mensagem clara dizendo qual chave está vazia.
+3. ⬜ Um servidor por chave no `/mcp`, no lugar do servidor do Spring AI (`spring.ai.mcp.server.enabled: false`), a partir do protótipo.
+   O `ToolMirror` põe cada tool só nos servidores das chaves que liberam aquele upstream (`upstreams` da configuração; a regra
+   "chave X vê upstream Y" fica num lugar só em `security/`). Tool fora da chave: `-32602 Unknown tool`, igual a inexistente.
+   Subida, reconexão e `list_changed` dos upstreams continuam pelo mesmo `apply`, agora para cada servidor.
+   Pronto quando: com uma chave `fs` (`upstreams: ["filesystem"]`), o `tools/list` tem só as 14 `filesystem__`, e chamar
+   `notion__API-get-self` com ela falha; com a `cli` (`"*"`), as 38 aparecem e a chamada funciona; a fase 3 continua valendo
+   (Notion cai e volta só nos servidores que o veem).
+4. ⬜ Autenticação em `/mcp` e `/admin/**` (Spring Security, filtro em `security/`). Sem header ou com valor errado → 401
+   (com `WWW-Authenticate: Bearer`), sem dizer qual parte falhou. O roteador do passo 3 lê a chave autenticada.
+   O preflight de CORS (`OPTIONS`) passa sem chave, e o CORS do `/admin` precisa liberar o header `Authorization`.
+   `/actuator/health` continua aberto. Remover o `server.address: 127.0.0.1` só depois deste passo, e só se quiser.
+   `/admin` só para chave com `admin: true`: chave válida sem admin → 403.
+   Pronto quando: os curls de "Testes rápidos" dão 401 sem chave e 200 com `-H "Authorization: Bearer $GATE_KEY_CLI"`; a chave `cli`
+   dá 403 no `/admin/upstreams` e a `painel` dá 200; o Claude Code conecta com
+   `claude mcp add --transport http gate-of-truth http://localhost:8080/mcp --header "Authorization: Bearer $GATE_KEY_CLI"`.
+5. ⬜ Testes: autenticação (401/403/200, preflight sem chave), propriedades (chave vazia ou repetida falha) e filtro por chave.
+
+Cuidados:
+- Chave nunca no código, no yml commitado nem em log. `.env` ou variável no IntelliJ; no Windows, variável de ambiente do usuário.
+- A resiliência da fase 3 não muda: health check e reconexão não passam por autenticação (são internos).
+- Quando um upstream reconecta e as tools voltam, o filtro por chave continua valendo (ele olha a chave do upstream, não a lista fixa).
+- Fora da fase 4: OAuth, cadastro de chaves pelo painel (etapa B), auditoria de quem chamou o quê (fase 5).
+
 ## Notas para depois
-- O servidor anuncia capacidades de resources, prompts e completions sem ter nenhum; dá para desligar e anunciar só tools.
+- O servidor anuncia capacidades de resources, prompts e completions sem ter nenhum; resolvido na fase 4 (servidores montados na mão: só tools e logging, que o SDK força).
 
 ## Próximas fases
-4) controle de acesso (API key, depois OAuth); 5) auditoria e métricas (Micrometer).
+4b) OAuth 2.0 no lugar (ou ao lado) das API keys, via spring-ai-community/mcp-security; 5) auditoria e métricas (Micrometer).
 
 ## Testes rápidos
 Handshake e listagem de tools no gateway:
@@ -235,6 +391,7 @@ Handshake e listagem de tools no gateway:
 curl -i -X POST http://localhost:8080/mcp -H "Content-Type: application/json" -H "Accept: application/json, text/event-stream" \
   -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"curl","version":"1.0"}}}'
 # copie o Mcp-Session-Id dos headers
+# a partir da fase 4, todo curl leva -H "Authorization: Bearer $GATE_KEY_CLI" (ou $GATE_KEY_PANEL no /admin)
 curl -X POST http://localhost:8080/mcp -H "Content-Type: application/json" -H "Accept: application/json, text/event-stream" \
   -H "Mcp-Session-Id: <id>" -d '{"jsonrpc":"2.0","id":2,"method":"tools/list"}'
 # chamar uma tool (troque o nome; na fase 2, com prefixo)
@@ -250,4 +407,5 @@ curl -s -X POST http://localhost:8080/admin/tools/filesystem__list_allowed_direc
   -H "Content-Type: application/json" -d '{}' | jq
 curl -s -o /dev/null -w "%{http_code}\n" http://localhost:8080/admin/upstreams/xpto/tools   # 404
 ```
+
 
