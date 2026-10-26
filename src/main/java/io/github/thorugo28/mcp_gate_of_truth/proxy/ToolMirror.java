@@ -1,8 +1,10 @@
 package io.github.thorugo28.mcp_gate_of_truth.proxy;
 
+import java.util.List;
 import java.util.Map;
 
 import io.github.thorugo28.mcp_gate_of_truth.routing.ToolRouter;
+import io.github.thorugo28.mcp_gate_of_truth.upstream.UpstreamDownEvent;
 import io.github.thorugo28.mcp_gate_of_truth.upstream.UpstreamRegistry;
 import io.modelcontextprotocol.client.McpSyncClient;
 import io.modelcontextprotocol.server.McpServerFeatures;
@@ -15,9 +17,11 @@ import org.springframework.context.event.EventListener;
 import org.springframework.stereotype.Component;
 
 /**
- * Espelha no servidor do gateway as tools de cada upstream, com o nome prefixado pela chave do upstream
+ * Espelha no servidor do gateway as tools de cada upstream conectado, com o nome prefixado pela chave do upstream
  * ({@code <chave>__<nome original>}); descrição, inputSchema e o resto ficam iguais.
  * Cada tool entra na tabela do {@link ToolRouter}, e o handler delega a chamada para ele.
+ * Quando um upstream cai, as tools dele saem do servidor (cada {@code removeTool} avisa os clientes com
+ * {@code notifications/tools/list_changed}) e da tabela.
  */
 @Component
 public class ToolMirror {
@@ -40,7 +44,7 @@ public class ToolMirror {
 
 	@EventListener(ApplicationReadyEvent.class)
 	public void mirrorTools() {
-		for (Map.Entry<String, McpSyncClient> entry : registry.clients().entrySet()) {
+		for (Map.Entry<String, McpSyncClient> entry : registry.connected().entrySet()) {
 			McpSyncClient client = entry.getValue();
 			for (McpSchema.Tool tool : client.listTools().tools()) {
 				String exposedName = entry.getKey() + SEPARATOR + tool.name();
@@ -52,6 +56,14 @@ public class ToolMirror {
 			}
 		}
 		log.info("{} tool(s) espelhada(s) no /mcp", server.listTools().size());
+	}
+
+	@EventListener
+	public void removeTools(UpstreamDownEvent event) {
+		List<String> names = router.unregister(event.key());
+		names.forEach(server::removeTool);
+		log.info("{} tool(s) do upstream '{}' retirada(s) do /mcp; sobram {}", names.size(), event.key(),
+				server.listTools().size());
 	}
 
 	private static McpSchema.Tool withName(McpSchema.Tool tool, String name) {

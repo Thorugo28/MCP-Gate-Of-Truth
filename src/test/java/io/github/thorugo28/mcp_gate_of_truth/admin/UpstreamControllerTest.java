@@ -5,6 +5,7 @@ import java.util.Map;
 
 import io.github.thorugo28.mcp_gate_of_truth.routing.ToolRouter;
 import io.github.thorugo28.mcp_gate_of_truth.upstream.UpstreamRegistry;
+import io.github.thorugo28.mcp_gate_of_truth.upstream.UpstreamStatus;
 import io.modelcontextprotocol.client.McpSyncClient;
 import io.modelcontextprotocol.spec.McpSchema;
 import org.junit.jupiter.api.Test;
@@ -13,6 +14,8 @@ import org.springframework.boot.webmvc.test.autoconfigure.WebMvcTest;
 import org.springframework.test.context.bean.override.mockito.MockitoBean;
 import org.springframework.test.web.servlet.MockMvc;
 
+import static org.hamcrest.Matchers.contains;
+import static org.hamcrest.Matchers.nullValue;
 import static org.mockito.BDDMockito.given;
 import static org.mockito.Mockito.mock;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
@@ -46,8 +49,8 @@ class UpstreamControllerTest {
 	void listsUpstreamsWithStatusAndToolCount() throws Exception {
 		given(registry.clients()).willReturn(Map.of("filesystem", up, "notion", down));
 		given(up.getServerInfo()).willReturn(new McpSchema.Implementation("secure-filesystem-server", "0.2.0"));
-		given(down.getServerInfo()).willReturn(new McpSchema.Implementation("Notion API", "1.0.0"));
-		given(down.ping()).willThrow(new RuntimeException("timeout"));
+		given(registry.status("filesystem")).willReturn(UpstreamStatus.UP);
+		given(registry.status("notion")).willReturn(UpstreamStatus.DOWN);
 		given(router.routesOf("filesystem"))
 			.willReturn(List.of(new ToolRouter.Route("filesystem__read_file", "filesystem", up, readFile)));
 		given(router.routesOf("notion")).willReturn(List.of());
@@ -59,7 +62,9 @@ class UpstreamControllerTest {
 			.andExpect(jsonPath("$[?(@.key == 'filesystem')].serverVersion").value("0.2.0"))
 			.andExpect(jsonPath("$[?(@.key == 'filesystem')].status").value("UP"))
 			.andExpect(jsonPath("$[?(@.key == 'filesystem')].toolCount").value(1))
-			.andExpect(jsonPath("$[?(@.key == 'notion')].status").value("DOWN"));
+			.andExpect(jsonPath("$[?(@.key == 'notion')].status").value("DOWN"))
+			.andExpect(jsonPath("$[?(@.key == 'notion')].serverName").value(contains(nullValue())))
+			.andExpect(jsonPath("$[?(@.key == 'notion')].toolCount").value(0));
 	}
 
 	@Test

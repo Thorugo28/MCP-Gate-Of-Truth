@@ -48,20 +48,12 @@ public class UpstreamController {
 
 	private UpstreamDto toDto(Map.Entry<String, McpSyncClient> entry) {
 		McpSyncClient client = entry.getValue();
+		// null se o upstream não inicializou
 		McpSchema.Implementation serverInfo = client.getServerInfo();
-		return new UpstreamDto(entry.getKey(), serverInfo.name(), serverInfo.version(), status(client),
+		// status guardado pelo health check; não fala com o upstream
+		return new UpstreamDto(entry.getKey(), serverInfo != null ? serverInfo.name() : null,
+				serverInfo != null ? serverInfo.version() : null, registry.status(entry.getKey()).name(),
 				router.routesOf(entry.getKey()).size());
-	}
-
-	// O ping usa o request-timeout do cliente (60s): upstream travado trava a resposta. Timeout curto é fase 3.
-	private static String status(McpSyncClient client) {
-		try {
-			client.ping();
-			return "UP";
-		}
-		catch (RuntimeException ex) {
-			return "DOWN";
-		}
 	}
 
 }

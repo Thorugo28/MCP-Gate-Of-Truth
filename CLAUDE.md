@@ -129,7 +129,7 @@ Pronto quando: com o gateway no ar, `pkill -f notion-mcp-server` → o filesyste
 `notion` como `DOWN` e o `tools/list` cai para 14; depois, sem reiniciar o gateway, o Notion volta e as 24 tools reaparecem.
 
 Passos:
-0. ⬜ Investigar antes de codar (só leitura do código do Spring AI 2.0 e do MCP SDK 2.0; anotar aqui o que achar):
+0. ✅ Investigar antes de codar (só leitura do código do Spring AI 2.0 e do MCP SDK 2.0; anotar aqui o que achar):
    a) Existe `spring.ai.mcp.client.initialized: false`? Com ele, os clientes são criados sem subir o processo e sem o handshake,
       e o gateway chama `initialize()` de cada um? Se sim, a subida tolerante (passo 1) não precisa criar clientes na mão.
    b) Um `McpSyncClient` cujo processo STDIO morreu pode ser inicializado de novo, ou o transporte fecha de vez?
@@ -137,18 +137,76 @@ Passos:
       (`McpStdioClientProperties`): é o "plano B" da fase 2. Conversar antes de seguir por ele.
    c) Como avisar os clientes do gateway: confirmar que `McpSyncServer.removeTool`/`addTool` disparam `notifications/tools/list_changed`.
    d) Como receber o `list_changed` de um upstream no Spring AI (provavelmente um `McpSyncClientCustomizer` com `toolsChangeConsumer`).
-1. ⬜ Subida tolerante. Cada upstream é inicializado separadamente; se falhar, fica `DOWN`, sem tools, e o gateway sobe com os outros.
+   Feito (2026-10-25), lido nas fontes do Spring AI 2.0.1 e do MCP SDK 2.0.0:
+   a) Sim. `spring.ai.mcp.client.initialized` (padrão `true`) só controla o `client.initialize()` no fim do
+      `McpClientAutoConfiguration.mcpSyncClients`; com `false` o bean é criado sem subir o processo (o `StdioClientTransport`
+      só faz `ProcessBuilder.start()` no `connect`, chamado no initialize). Não precisa criar cliente na mão no passo 1.
+      Pegadinhas: (1) toda operação do cliente (`listTools`, `callTool`, `ping`) faz initialize implícito se ele não estiver
+      inicializado (`LifecycleInitializer.withInitialization`), e depois de uma falha o estado volta a "não inicializado";
+      então **nunca chamar nada num cliente DOWN**, senão ele tenta de novo no mesmo transporte (ver b) e pode subir outro `npx`.
+      (2) O handshake tem timeout próprio, `initializationTimeout` (20s padrão do `McpClient`, o Spring AI não mexe), separado
+      do `request-timeout`. (3) `getServerInfo()` devolve `null` se o cliente não inicializou.
+      Bônus: o Spring AI também põe a chave do yml em `clientInfo.title()`.
+   b) Fecha de vez. No `StdioClientTransport` os sinks são `final` e unicast (aceitam um assinante só), `isClosing` nunca volta
+      a `false` e os schedulers são descartados no close. Um transporte não reconecta, então **reconexão (passo 4) = cliente
+      novo**, montado a partir de `McpStdioClientProperties.getConnections().get(chave).toServerParameters()` e
+      `McpClient.sync(new StdioClientTransport(...))`. É o plano B: conversar antes do passo 4.
+   c) Confirmado. `McpAsyncServer.addTool`/`removeTool` mandam `notifications/tools/list_changed` quando
+      `capabilities.tools.listChanged` é true, e o Spring AI liga isso por padrão (`spring.ai.mcp.server.tool-change-notification`).
+      Detalhe: é **uma notificação por tool** (tirar o Notion manda 24). `addTool` com nome repetido substitui a tool com um WARN;
+      `removeTool` de nome inexistente só loga WARN.
+   d) Mais fácil do que o previsto: o Spring AI já registra o `McpSyncToolsChangeEventEmmiter` (um `McpClientCustomizer`), que
+      publica `org.springframework.ai.mcp.McpToolsChangedEvent(connectionName, tools)` no Spring. Basta um `@EventListener`;
+      `connectionName` é a chave do yml. Atenção: só vale para clientes montados pelo Spring AI. O cliente novo do passo 4
+      precisa receber o `toolsChangeConsumer` na mão.
+1. ✅ Subida tolerante. Cada upstream é inicializado separadamente; se falhar, fica `DOWN`, sem tools, e o gateway sobe com os outros.
    Pronto quando: com a conexão `notion` apontando para um pacote inexistente, o gateway sobe, o filesystem funciona pelo `/mcp`
    e `/admin/upstreams` mostra `notion` `DOWN` com 0 tools.
-2. ⬜ Timeouts curtos, por propriedade (ex.: `gate.upstreams.ping-timeout: 3s`, `gate.upstreams.call-timeout: 30s`).
+   Feito: `initialized: false` no yml; o `UpstreamRegistry` chama `initialize()` de cada cliente no construtor e, se falhar,
+   faz `closeGracefully()` (mata o processo) e deixa o upstream fora de `connected()`. `clients()` tem todos, `connected()` só os UP
+   (é o que `ToolMirror` e `UpstreamToolsLogger` usam), `status(key)` dá DOWN sem tocar no cliente ou o resultado do ping.
+   No `/admin/upstreams`, upstream DOWN vem com `serverName`/`serverVersion` `null` e `toolCount` 0; `/admin/upstreams/notion/tools` dá `[]`.
+   Testado com `--spring.ai.mcp.client.stdio.connections.notion.args=-y,@notionhq/pacote-que-nao-existe-xyz` (trocar só
+   `args[1]` pela linha de comando quebra o bind): sobe com 14 tools no `/mcp`, filesystem responde, nenhum processo sobra.
+   O upstream quebrado atrasa a subida em ~20s (`initializationTimeout`), mesmo com o `npx` morrendo logo; inicializar em
+   paralelo ou baixar esse timeout fica para o passo 2.
+2. ✅ Timeouts curtos, por propriedade (ex.: `gate.upstreams.ping-timeout: 3s`, `gate.upstreams.call-timeout: 30s`).
    Se o SDK não aceitar timeout por chamada, rodar a chamada num executor e usar `Future.get(timeout)`.
    Pronto quando: com o processo do Notion congelado (`pkill -STOP -f notion-mcp-server`), `/admin/upstreams` responde em ~3s
    e uma chamada `notion__...` devolve erro de tool em vez de travar. (`pkill -CONT -f notion-mcp-server` para descongelar.)
-3. ⬜ Health check. Um `@Scheduled` (ex.: `gate.upstreams.health-interval: 15s`) pinga cada upstream e guarda o status num lugar só
+   Feito: `config/UpstreamProperties` (`gate.upstreams.init-timeout`/`ping-timeout`/`call-timeout`, padrões 20s/60s/60s =
+   comportamento de antes). O SDK não tem timeout por chamada, então `upstream/UpstreamExecutor` roda a chamada numa virtual
+   thread e espera com `Future.get(timeout)` (estourou: `cancel(true)`). O `ToolRouter` usa o call-timeout e devolve
+   `isError: true` com "Upstream 'notion' não respondeu em 5s" (ou "Falha ao chamar o upstream ...: <msg>" se o cliente lançar).
+   O `UpstreamRegistry.status` usa o ping-timeout. O init-timeout entra num `McpClientCustomizer` em `config/UpstreamClientConfig`.
+   Testado com 5s nos três (bloco marcado como TESTE no application.yml): Notion congelado → `/admin/upstreams` em 5,0s com
+   `notion` DOWN, `notion__API-get-self` erro de tool em 5,0s pelo `/mcp` e pelo playground, filesystem normal; descongelado,
+   volta a UP. Pacote inexistente atrasa a subida 5s em vez de 20s.
+   **Cuidado no teste:** `pkill -f notion-mcp-server` congela o Notion de todo gateway rodando na máquina. Pegar só os filhos do
+   java da porta testada (`ss -ltnp | grep :8081` → pid → `pgrep -P` recursivo).
+   Ok dado em 2026-10-25; bloco de TESTE removido, valem os padrões (20s/60s/60s; o ping foi para 3s no passo 3). Para testar de novo, passar
+   `--gate.upstreams.call-timeout=5s` (etc.) na linha de comando.
+   Obs.: o `/admin/upstreams` pinga os upstreams um depois do outro, então o pior caso é ping-timeout × upstreams travados
+   (o passo 3 resolve, lendo status guardado).
+3. ✅ Health check. Um `@Scheduled` (ex.: `gate.upstreams.health-interval: 15s`) pinga cada upstream e guarda o status num lugar só
    em `upstream/`. O `/admin` passa a ler esse status guardado, sem pingar na hora da requisição.
    Na transição UP → DOWN: tirar as tools daquele upstream do `McpSyncServer` e do `ToolRouter` (o `ToolRouter` vai precisar de um
    `unregister` por chave) e fechar o cliente, para não sobrar processo zumbi.
    Pronto quando: `pkill -f notion-mcp-server` → em até 15s o painel mostra `DOWN` e o `tools/list` do `/mcp` tem 14 tools.
+   Feito: o `UpstreamRegistry` é o único lugar do status (UP = estar em `connected()`, agora mutável). O
+   `upstream/UpstreamHealthCheck` (`SchedulingConfigurer`, fixed delay de `gate.upstreams.health-interval`, padrão 10s; `@EnableScheduling`
+   em `config/UpstreamClientConfig`) pinga os conectados em paralelo com o ping-timeout; falhou → `registry.markDown(key)`, que tira
+   de `connected()`, publica `upstream/UpstreamDownEvent` e fecha o cliente (nessa ordem; só a 1ª chamada por chave faz algo).
+   O `proxy/ToolMirror` escuta o evento: `ToolRouter.unregister(key)` devolve os nomes e cada um sai do `McpSyncServer`.
+   `upstream` não conhece `proxy`. O `/admin` lê `registry.status(key)` sem pingar (responde em ms). O `ToolRouter` checa
+   `registry.isConnected` antes de chamar: "Upstream 'notion' indisponível" na janela entre cair e a rota sair.
+   Upstream que caiu fica com `serverName`/`serverVersion` `null` (o close zera o resultado do initialize).
+   Testado na 8081 (matando só os filhos do java da porta): 24 `list_changed` no stream SSE, `tools/list` com 14, filesystem
+   normal, chamada `notion__...` dá 404 no playground, nenhum processo sobra (`npx` sai com 143 = SIGTERM).
+   **Achado:** processo morto não faz o ping falhar na hora; o SDK não percebe o transporte fechado e o ping espera o
+   ping-timeout inteiro. Detecção = até health-interval + ping-timeout: com o padrão de 60s deu 61s; com
+   `--gate.upstreams.ping-timeout=3s`, 17,8s. Decidido em 2026-10-26: padrões `ping-timeout: 3s` e `health-interval: 10s`
+   (pior caso ~13s); `init-timeout` 20s e `call-timeout` 60s continuam. Com os padrões novos: DOWN em 12,1s, 14 tools.
 4. ⬜ Reconexão. Upstream `DOWN` é tentado de novo com backoff (ex.: 15s, 30s, 60s, teto de 5 min). Ao conectar, as tools são
    registradas de novo (no `McpSyncServer` e no `ToolRouter`) e o status volta a `UP`. Depende do que o passo 0b mostrar.
    Pronto quando: depois do `pkill`, o gateway sobe o `npx` de novo sozinho e as 24 tools do Notion reaparecem sem reiniciar.
