@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Console igual ao padrão do Boot, mais um arquivo JSON só para a auditoria (logger gate.audit, ver audit/AuditLog).
+  Com este arquivo o Boot não monta mais o log sozinho: logging.file.name deixa de valer até alguém incluir aqui o
+  file-appender.xml do Boot.
+-->
+<configuration>
+	<include resource="org/springframework/boot/logging/logback/defaults.xml"/>
+	<include resource="org/springframework/boot/logging/logback/console-appender.xml"/>
+
+	<springProperty name="AUDIT_FILE" source="gate.audit.file" defaultValue="logs/audit.json"/>
+
+	<appender name="AUDIT_FILE" class="ch.qos.logback.core.rolling.RollingFileAppender">
+		<file>${AUDIT_FILE}</file>
+		<!-- JSON de uma linha por chamada, no formato ECS, com o encoder do próprio Boot -->
+		<encoder class="org.springframework.boot.logging.logback.StructuredLogEncoder">
+			<format>ecs</format>
+			<charset>UTF-8</charset>
+		</encoder>
+		<rollingPolicy class="ch.qos.logback.core.rolling.SizeAndTimeBasedRollingPolicy">
+			<fileNamePattern>${AUDIT_FILE}.%d{yyyy-MM-dd}.%i.gz</fileNamePattern>
+			<maxFileSize>10MB</maxFileSize>
+			<maxHistory>30</maxHistory>
+			<totalSizeCap>1GB</totalSizeCap>
+		</rollingPolicy>
+	</appender>
+
+	<!-- a chamada não espera o disco: a linha vai para uma fila; fila cheia descarta em vez de travar -->
+	<appender name="AUDIT" class="ch.qos.logback.classic.AsyncAppender">
+		<appender-ref ref="AUDIT_FILE"/>
+		<discardingThreshold>0</discardingThreshold>
+		<neverBlock>true</neverBlock>
+	</appender>
+
+	<logger name="gate.audit" level="INFO" additivity="false">
+		<appender-ref ref="AUDIT"/>
+	</logger>
+
+	<root level="INFO">
+		<appender-ref ref="CONSOLE"/>
+	</root>
+</configuration>

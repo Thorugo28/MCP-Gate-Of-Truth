@@ -12,6 +12,7 @@ import io.github.thorugo28.mcp_gate_of_truth.config.UpstreamProperties;
 import io.modelcontextprotocol.client.McpSyncClient;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import jakarta.annotation.PreDestroy;
 import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.stereotype.Component;
 
@@ -26,6 +27,9 @@ import org.springframework.stereotype.Component;
  * <p>
  * Cliente de upstream DOWN é sempre descartado: o transporte STDIO não reabre, e qualquer chamada nele tentaria
  * inicializar de novo. Reconectar é criar um cliente novo.
+ * <p>
+ * Os clientes são nossos (o autoconfig do Spring AI está desligado), então fechá-los no fim do contexto também é: sem isso,
+ * os processos dos upstreams sobram e, numa falha de subida, as threads dos transportes seguram a JVM.
  */
 @Component
 public class UpstreamRegistry {
@@ -48,6 +52,8 @@ public class UpstreamRegistry {
 	private final Map<String, McpSyncClient> connected = new ConcurrentHashMap<>();
 
 	private final Map<String, Retry> retries = new ConcurrentHashMap<>();
+
+	private volatile boolean closed;
 
 	public UpstreamRegistry(UpstreamClientFactory factory, ApplicationEventPublisher events, UpstreamProperties properties,
 			Clock clock) {
@@ -120,7 +126,10 @@ public class UpstreamRegistry {
 		return keys.stream().map(this::state).toList();
 	}
 
-	private UpstreamState state(String key) {
+	/**
+	 * Foto de um upstream, sem falar com ele.
+	 */
+	public UpstreamState state(String key) {
 		McpSyncClient client = connected.get(key);
 		if (client != null) {
 			return new UpstreamState(key, UpstreamStatus.UP, client.getServerInfo(), 0, null);
@@ -166,7 +175,7 @@ public class UpstreamRegistry {
 	 */
 	public void reconnect(String key) {
 		Retry retry = retries.get(key);
-		if (retry == null) {
+		if (retry == null || closed) {
 			return;
 		}
 		McpSyncClient client = connect(key);
@@ -174,6 +183,11 @@ public class UpstreamRegistry {
 			Retry next = new Retry(retry.attempts() + 1, clock.instant().plus(delayAfter(retry.attempts() + 1)));
 			retries.put(key, next);
 			log.warn("Reconexão {} do upstream '{}' falhou; próxima às {}", next.attempts(), key, next.nextAt());
+			return;
+		}
+		if (closed) {
+			// o contexto fechou durante o handshake
+			client.closeGracefully();
 			return;
 		}
 		retries.remove(key);
@@ -187,6 +201,24 @@ public class UpstreamRegistry {
 			log.warn("Upstream '{}' reconectou mas as tools não foram registradas: {}", key, ex.getMessage());
 			markDown(key);
 		}
+	}
+
+	/**
+	 * Fim do contexto (desligamento ou falha na subida): fecha todos os clientes, matando os processos dos upstreams.
+	 */
+	@PreDestroy
+	public void close() {
+		closed = true;
+		retries.clear();
+		connected.forEach((key, client) -> {
+			try {
+				client.closeGracefully();
+			}
+			catch (RuntimeException ex) {
+				log.warn("Upstream '{}' não fechou: {}", key, ex.getMessage());
+			}
+		});
+		connected.clear();
 	}
 
 }

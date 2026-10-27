@@ -3,13 +3,12 @@ package io.github.thorugo28.mcp_gate_of_truth.proxy;
 import java.util.List;
 
 import io.github.thorugo28.mcp_gate_of_truth.routing.ToolRouter;
+import io.github.thorugo28.mcp_gate_of_truth.routing.Via;
 import io.github.thorugo28.mcp_gate_of_truth.upstream.UpstreamDownEvent;
 import io.github.thorugo28.mcp_gate_of_truth.upstream.UpstreamRegistry;
 import io.github.thorugo28.mcp_gate_of_truth.upstream.UpstreamToolsChangedEvent;
 import io.github.thorugo28.mcp_gate_of_truth.upstream.UpstreamUpEvent;
 import io.modelcontextprotocol.client.McpSyncClient;
-import io.modelcontextprotocol.server.McpServerFeatures;
-import io.modelcontextprotocol.server.McpSyncServer;
 import io.modelcontextprotocol.spec.McpSchema;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -18,8 +17,9 @@ import org.springframework.context.event.EventListener;
 import org.springframework.stereotype.Component;
 
 /**
- * Espelha no servidor do gateway as tools de cada upstream conectado, com o nome prefixado pela chave do upstream
- * ({@code <chave>__<nome original>}); descrição, inputSchema e o resto ficam iguais.
+ * Espelha nos servidores do gateway ({@link KeyServers}, um por chave de acesso) as tools de cada upstream conectado, com o
+ * nome prefixado pela chave do upstream ({@code <chave>__<nome original>}); descrição, inputSchema e o resto ficam iguais.
+ * Cada tool vai só para os servidores das chaves que veem aquele upstream.
  * Cada tool entra na tabela do {@link ToolRouter}, e o handler delega a chamada para ele.
  * Quando um upstream cai, as tools dele saem do servidor e da tabela; quando reconecta, entram de novo; quando avisa
  * que a lista mudou, só a diferença é aplicada ({@link ToolDiff}). Cada {@code addTool}/{@code removeTool} avisa os clientes
@@ -35,14 +35,14 @@ public class ToolMirror {
 
 	private static final Logger log = LoggerFactory.getLogger(ToolMirror.class);
 
-	private final McpSyncServer server;
+	private final KeyServers servers;
 
 	private final UpstreamRegistry registry;
 
 	private final ToolRouter router;
 
-	public ToolMirror(McpSyncServer server, UpstreamRegistry registry, ToolRouter router) {
-		this.server = server;
+	public ToolMirror(KeyServers servers, UpstreamRegistry registry, ToolRouter router) {
+		this.servers = servers;
 		this.registry = registry;
 		this.router = router;
 	}
@@ -50,7 +50,7 @@ public class ToolMirror {
 	@EventListener(ApplicationReadyEvent.class)
 	public synchronized void mirrorTools() {
 		registry.connected().forEach((key, client) -> apply(key, client, client.listTools().tools()));
-		log.info("{} tool(s) espelhada(s) no /mcp", server.listTools().size());
+		log.info("Tools no /mcp por chave de acesso: {}", servers.toolCounts());
 	}
 
 	@EventListener
@@ -60,8 +60,8 @@ public class ToolMirror {
 			return;
 		}
 		apply(event.key(), client, client.listTools().tools());
-		log.info("Tools do upstream '{}' de volta ao /mcp ({}); total {}", event.key(),
-				router.routesOf(event.key()).size(), server.listTools().size());
+		log.info("Tools do upstream '{}' de volta ao /mcp ({}); por chave {}", event.key(),
+				router.routesOf(event.key()).size(), servers.toolCounts());
 	}
 
 	@EventListener
@@ -73,8 +73,8 @@ public class ToolMirror {
 		}
 		ToolDiff diff = apply(event.key(), client, event.tools());
 		if (!diff.isEmpty()) {
-			log.info("Upstream '{}' mudou a lista de tools: -{} +{} ~{}; total {}", event.key(), diff.removed().size(),
-					diff.added().size(), diff.changed().size(), server.listTools().size());
+			log.info("Upstream '{}' mudou a lista de tools: -{} +{} ~{}; por chave {}", event.key(), diff.removed().size(),
+					diff.added().size(), diff.changed().size(), servers.toolCounts());
 		}
 	}
 
@@ -88,10 +88,10 @@ public class ToolMirror {
 		for (String name : diff.removed()) {
 			String exposedName = exposedName(key, name);
 			router.remove(exposedName);
-			server.removeTool(exposedName);
+			servers.removeTool(key, exposedName);
 		}
 		for (McpSchema.Tool tool : diff.changed()) {
-			// a rota guarda a Tool; o addTool do servidor substitui a de mesmo nome
+			// a rota guarda a Tool; o addTool dos servidores substitui a de mesmo nome
 			router.remove(exposedName(key, tool.name()));
 			expose(key, client, tool);
 		}
@@ -102,10 +102,7 @@ public class ToolMirror {
 	private void expose(String key, McpSyncClient client, McpSchema.Tool tool) {
 		String exposedName = exposedName(key, tool.name());
 		router.register(exposedName, key, client, tool);
-		server.addTool(McpServerFeatures.SyncToolSpecification.builder()
-			.tool(withName(tool, exposedName))
-			.callHandler((exchange, request) -> router.call(request))
-			.build());
+		servers.addTool(key, withName(tool, exposedName), (caller, request) -> router.call(caller, Via.MCP, request));
 	}
 
 	private static String exposedName(String key, String originalName) {
@@ -115,9 +112,9 @@ public class ToolMirror {
 	@EventListener
 	public synchronized void removeTools(UpstreamDownEvent event) {
 		List<String> names = router.unregister(event.key());
-		names.forEach(server::removeTool);
-		log.info("{} tool(s) do upstream '{}' retirada(s) do /mcp; sobram {}", names.size(), event.key(),
-				server.listTools().size());
+		names.forEach(name -> servers.removeTool(event.key(), name));
+		log.info("{} tool(s) do upstream '{}' retirada(s) do /mcp; por chave {}", names.size(), event.key(),
+				servers.toolCounts());
 	}
 
 	private static McpSchema.Tool withName(McpSchema.Tool tool, String name) {

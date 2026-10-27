@@ -1,5 +1,6 @@
 package io.github.thorugo28.mcp_gate_of_truth.proxy;
 
+import java.time.Clock;
 import java.time.Duration;
 import java.util.List;
 import java.util.Map;
@@ -12,13 +13,13 @@ import io.github.thorugo28.mcp_gate_of_truth.upstream.UpstreamRegistry;
 import io.github.thorugo28.mcp_gate_of_truth.upstream.UpstreamToolsChangedEvent;
 import io.github.thorugo28.mcp_gate_of_truth.upstream.UpstreamUpEvent;
 import io.modelcontextprotocol.client.McpSyncClient;
-import io.modelcontextprotocol.server.McpSyncServer;
 import io.modelcontextprotocol.spec.McpSchema;
 import org.junit.jupiter.api.Test;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.argThat;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.BDDMockito.given;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -27,15 +28,16 @@ import static org.mockito.Mockito.verify;
 
 class ToolMirrorTest {
 
-	private final McpSyncServer server = mock(McpSyncServer.class);
+	private final KeyServers servers = mock(KeyServers.class);
 
 	private final UpstreamRegistry registry = mock(UpstreamRegistry.class);
 
 	private final ToolRouter router = new ToolRouter(new UpstreamExecutor(), new UpstreamProperties(Duration.ofSeconds(20),
 			Duration.ofSeconds(3), Duration.ofSeconds(60), Duration.ofSeconds(10), Duration.ofSeconds(15),
-			Duration.ofMinutes(5)), registry);
+			Duration.ofMinutes(5)), registry, event -> {
+			}, Clock.systemUTC());
 
-	private final ToolMirror mirror = new ToolMirror(server, registry, router);
+	private final ToolMirror mirror = new ToolMirror(servers, registry, router);
 
 	private final McpSyncClient client = mock(McpSyncClient.class);
 
@@ -56,7 +58,7 @@ class ToolMirrorTest {
 		mirror.addTools(new UpstreamUpEvent("notion"));
 
 		assertThat(exposedNames("notion")).containsExactly("notion__API-get-self");
-		verify(server).addTool(argThat(spec -> spec.tool().name().equals("notion__API-get-self")));
+		verify(servers).addTool(eq("notion"), argThat(tool -> tool.name().equals("notion__API-get-self")), any());
 	}
 
 	@Test
@@ -68,8 +70,8 @@ class ToolMirrorTest {
 		mirror.removeTools(new UpstreamDownEvent("notion"));
 
 		assertThat(router.routesOf("notion")).isEmpty();
-		verify(server).removeTool("notion__API-get-self");
-		verify(server).removeTool("notion__API-post-page");
+		verify(servers).removeTool("notion", "notion__API-get-self");
+		verify(servers).removeTool("notion", "notion__API-post-page");
 	}
 
 	@Test
@@ -86,12 +88,14 @@ class ToolMirrorTest {
 		assertThat(router.find("filesystem__write_file")).get()
 			.extracting(route -> route.tool().description())
 			.isEqualTo("Escreve com cuidado");
-		verify(server).removeTool("filesystem__move_file");
+		verify(servers).removeTool("filesystem", "filesystem__move_file");
 		// read_file não mudou: só o addTool da primeira sincronização
-		verify(server, times(1)).addTool(argThat(spec -> spec.tool().name().equals("filesystem__read_file")));
+		verify(servers, times(1)).addTool(eq("filesystem"),
+				argThat(tool -> tool.name().equals("filesystem__read_file")), any());
 		// write_file mudou: addTool de novo, que substitui no servidor
-		verify(server, times(2)).addTool(argThat(spec -> spec.tool().name().equals("filesystem__write_file")));
-		verify(server, never()).removeTool("filesystem__write_file");
+		verify(servers, times(2)).addTool(eq("filesystem"),
+				argThat(tool -> tool.name().equals("filesystem__write_file")), any());
+		verify(servers, never()).removeTool("filesystem", "filesystem__write_file");
 	}
 
 	@Test
@@ -101,7 +105,7 @@ class ToolMirrorTest {
 		mirror.syncTools(new UpstreamToolsChangedEvent("notion", List.of(tool("API-get-self", "Eu"))));
 
 		assertThat(router.routesOf("notion")).isEmpty();
-		verify(server, never()).addTool(any());
+		verify(servers, never()).addTool(any(), any(), any());
 	}
 
 	@Test
@@ -115,7 +119,7 @@ class ToolMirrorTest {
 		mirror.addTools(new UpstreamUpEvent("notion"));
 
 		assertThat(exposedNames("notion")).containsExactly("notion__API-get-self");
-		verify(server, times(1)).addTool(any());
+		verify(servers, times(1)).addTool(any(), any(), any());
 	}
 
 }

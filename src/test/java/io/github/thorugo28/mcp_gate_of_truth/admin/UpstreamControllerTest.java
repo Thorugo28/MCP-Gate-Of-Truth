@@ -4,7 +4,9 @@ import java.time.Instant;
 import java.util.List;
 import java.util.Map;
 
+import io.github.thorugo28.mcp_gate_of_truth.config.SecurityConfig;
 import io.github.thorugo28.mcp_gate_of_truth.routing.ToolRouter;
+import io.github.thorugo28.mcp_gate_of_truth.security.AccessKeys;
 import io.github.thorugo28.mcp_gate_of_truth.upstream.UpstreamRegistry;
 import io.github.thorugo28.mcp_gate_of_truth.upstream.UpstreamState;
 import io.github.thorugo28.mcp_gate_of_truth.upstream.UpstreamStatus;
@@ -13,6 +15,7 @@ import io.modelcontextprotocol.spec.McpSchema;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.webmvc.test.autoconfigure.WebMvcTest;
+import org.springframework.context.annotation.Import;
 import org.springframework.test.context.bean.override.mockito.MockitoBean;
 import org.springframework.test.web.servlet.MockMvc;
 
@@ -24,8 +27,12 @@ import static org.springframework.test.web.servlet.request.MockMvcRequestBuilder
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
-@WebMvcTest(UpstreamController.class)
+@WebMvcTest(value = UpstreamController.class, properties = { "gate.security.keys.cli.value=teste-cli",
+		"gate.security.keys.painel.value=teste-painel" })
+@Import({ SecurityConfig.class, AccessKeys.class })
 class UpstreamControllerTest {
+
+	private static final String PAINEL = "Bearer teste-painel";
 
 	@Autowired
 	private MockMvc mvc;
@@ -55,7 +62,7 @@ class UpstreamControllerTest {
 			.willReturn(List.of(new ToolRouter.Route("filesystem__read_file", "filesystem", up, readFile)));
 		given(router.routesOf("notion")).willReturn(List.of());
 
-		mvc.perform(get("/admin/upstreams"))
+		mvc.perform(get("/admin/upstreams").header("Authorization", PAINEL))
 			.andExpect(status().isOk())
 			.andExpect(jsonPath("$.length()").value(2))
 			.andExpect(jsonPath("$[?(@.key == 'filesystem')].serverName").value("secure-filesystem-server"))
@@ -77,7 +84,7 @@ class UpstreamControllerTest {
 		given(router.routesOf("filesystem"))
 			.willReturn(List.of(new ToolRouter.Route("filesystem__read_file", "filesystem", up, readFile)));
 
-		mvc.perform(get("/admin/upstreams/filesystem/tools"))
+		mvc.perform(get("/admin/upstreams/filesystem/tools").header("Authorization", PAINEL))
 			.andExpect(status().isOk())
 			.andExpect(jsonPath("$[0].name").value("filesystem__read_file"))
 			.andExpect(jsonPath("$[0].originalName").value("read_file"))
@@ -91,7 +98,8 @@ class UpstreamControllerTest {
 	void unknownUpstreamReturns404() throws Exception {
 		given(registry.keys()).willReturn(List.of("filesystem", "notion"));
 
-		mvc.perform(get("/admin/upstreams/xpto/tools")).andExpect(status().isNotFound());
+		mvc.perform(get("/admin/upstreams/xpto/tools").header("Authorization", PAINEL))
+			.andExpect(status().isNotFound());
 	}
 
 }

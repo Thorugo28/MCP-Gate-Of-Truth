@@ -214,4 +214,22 @@ class UpstreamRegistryTest {
 		assertThat(registry.connected()).containsEntry("notion", notion);
 	}
 
+	@Test
+	void closeClosesEveryClientAndStopsReconnecting() {
+		McpSyncClient fs = healthy("fs");
+		McpSyncClient notion = failing();
+		given(factory.create("filesystem")).willReturn(fs);
+		given(factory.create("notion")).willReturn(notion);
+		UpstreamRegistry registry = registry("filesystem", "notion");
+
+		registry.close();
+		clock.advance(Duration.ofMinutes(1));
+
+		verify(fs).closeGracefully();
+		assertThat(registry.connected()).isEmpty();
+		assertThat(registry.dueForReconnect()).isEmpty();
+		registry.reconnect("notion");
+		verify(factory, times(1)).create("notion");
+	}
+
 }

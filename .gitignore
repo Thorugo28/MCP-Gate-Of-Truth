@@ -31,3 +31,9 @@ build/
 
 ### VS Code ###
 .vscode/
+
+### Segredos locais ###
+src/main/resources/application-local.yml
+
+### Logs (auditoria) ###
+logs/

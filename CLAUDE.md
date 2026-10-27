@@ -14,17 +14,26 @@ Gateway MCP agregador em Java/Spring, inspirado no Bifrost (Maxim AI).
 - Tools dos upstreams registradas programaticamente em tempo de execução, nunca via `@Tool`.
 - `spring.ai.mcp.client.toolcallback.enabled: false`: o atalho automático do Spring AI fica desligado de propósito.
 - Sem starter de modelo (OpenAI/Anthropic).
-- Spring Security só na etapa de controle de acesso (spring-ai-community/mcp-security).
+- Servidor: desde a fase 4, passo 3 (2026-10-26), o autoconfig do servidor MCP fica desligado (`spring.ai.mcp.server.enabled: false`)
+  e o gateway monta um `McpSyncServer` por chave de acesso em `proxy/KeyServers`, lendo as mesmas propriedades `spring.ai.mcp.server.*`.
+- Spring Security só na etapa de controle de acesso (filtro próprio para API key; spring-ai-community/mcp-security fica para o OAuth).
 
 ## Ambiente
 - Linux Mint, JDK/Maven via SDKMAN, Node v24.21.0 via nvm. Sem Docker.
-- Subir: `export NOTION_TOKEN=ntn_...` e `./mvnw spring-boot:run`.
-- O upstream do Notion é `@notionhq/notion-mcp-server` via STDIO, iniciado pelo gateway com o caminho absoluto do `npx`
-  e `PATH` no `env` da conexão (o `npx` precisa achar o `node`).
+- Subir: `./mvnw spring-boot:run -Dspring-boot.run.profiles=local` (ou perfil `local` no IntelliJ). O
+  `src/main/resources/application-local.yml` (fora do git, no `.gitignore`) tem o `NOTION_TOKEN` e os valores das chaves
+  `cli`/`painel`, além de `NPX_CMD`/`NODE_BIN`. Sem o perfil, valem as variáveis `NOTION_TOKEN`, `GATE_KEY_CLI`, `GATE_KEY_PANEL`
+  (`openssl rand -hex 32`), `NPX_CMD` e `NODE_BIN`.
+- Os upstreams (`@notionhq/notion-mcp-server` e `@modelcontextprotocol/server-filesystem`) sobem via STDIO pelo gateway,
+  com `command: ${NPX_CMD:npx}` e `PATH: ${NODE_BIN:/usr/bin}:${PATH}` no `env` (o `npx` precisa achar o `node`).
+  **`NPX_CMD` e `NODE_BIN` são obrigatórias** (caminhos do nvm, ex.: `~/.nvm/versions/node/v24.21.0/bin/npx` e `.../bin`):
+  sem elas, o Java procura o `npx` no PATH do processo, que fora de um terminal interativo (IntelliJ aberto pelo menu,
+  `java -jar`) não tem o nvm, e os upstreams sobem DOWN com `Cannot run program "npx": error=2`. Com o perfil `local`,
+  elas vêm do `application-local.yml`; sem o perfil, de variável de ambiente.
 - Os avisos "Cannot resolve property 'notion'" do IntelliJ no application.yml são falso positivo (chave de mapa).
 
 ## Estrutura de pacotes (decidido em 2026-10-23)
-Pacotes por responsabilidade, não as camadas controller/service/repository (o `/mcp` é atendido pelo Spring AI e não há banco).
+Pacotes por responsabilidade, não as camadas controller/service/repository (o `/mcp` é atendido pelo `proxy/KeyServers`, um servidor MCP por chave, atrás da rota do `proxy/McpEndpointConfig`, e não há banco).
 ```
 io.github.thorugo28.mcpgateoftruth   (confira o nome exato do último segmento)
 ├── upstream/   conexões com os servidores MCP de fora (ex.: UpstreamRegistry guarda os McpSyncClient e lista tools)
@@ -34,10 +43,10 @@ io.github.thorugo28.mcpgateoftruth   (confira o nome exato do último segmento)
 ├── security/   fase 4: chaves de acesso, filtro de autenticação e regras de quem vê qual tool
 └── config/     @ConfigurationProperties e beans
 ```
-- Fases futuras viram pacotes novos: `audit/` (logs e métricas).
+- Fase 5: pacote novo `audit/` (log de auditoria, métricas e últimas chamadas). `audit` escuta eventos; `routing` não depende de `audit`.
 - `security` não depende de `admin` nem de `proxy`; `routing` e `proxy` perguntam a `security` se a chave pode usar uma tool.
 - `proxy` depende de `upstream`, nunca o contrário.
-- `admin` só lê de `upstream` e `routing` (e chama tools pelo `ToolRouter`); nada depende de `admin`.
+- `admin` só lê de `upstream`, `routing` e `audit` (o `CallLog`, desde a fase 5) e chama tools pelo `ToolRouter`; nada depende de `admin`.
 - Sem interfaces antes de existir uma segunda implementação; com um upstream só, classes concretas.
 
 ## Concluído: MVP (2026-10-23)
@@ -255,7 +264,7 @@ Cuidados:
 - Status ficou só `UP`/`DOWN` (decidido em 2026-10-26); a reconexão aparece em `attempts` e `nextRetryAt`.
 - Fora da fase 3: autenticação, filtro de tools e métricas.
 
-## Estado atual: fase 4, controle de acesso (API key)
+## Concluído: fase 4, controle de acesso (API key) (2026-10-26)
 Objetivo: ninguém chama o gateway sem chave, e cada chave só vê e só chama as tools liberadas para ela.
 Hoje qualquer processo na máquina chama qualquer tool (inclusive `write_file` e `API-post-page`), pelo `/mcp` e pelo `/admin`.
 Pronto quando: sem chave, `/mcp` e `/admin` dão 401; duas chaves diferentes veem listas de tools diferentes no `tools/list`
@@ -328,7 +337,7 @@ Passos:
    - Filtro: opção 2, **um `McpSyncServer` por chave** (nunca por "perfil": juntar chaves com os mesmos upstreams perde o
      isolamento de sessão). Cada servidor guarda as próprias sessões, então sessão aberta com uma chave e usada com outra dá 404
      sem amarrar o `Mcp-Session-Id` na mão (o que o mcp-security tinha de melhor vem de graça).
-     Os servidores são montados na mão e anunciam **só a capacidade de tools** (fecha a nota antiga de "Notas para depois").
+     Os servidores são montados na mão e anunciam **só a capacidade de tools** (fecha a nota antiga sobre as capacidades de resources, prompts e completions anunciadas sem uso).
      Cada servidor guarda o nome da sua chave: na auditoria (fase 5), "quem chamou" é o servidor por onde a chamada passou.
    - Autenticação: **Spring Security puro** com um filtro nosso em `security/` (`Authorization: Bearer`, `MessageDigest.isEqual`,
      formato do yml acima). O mcp-security fica para o OAuth (4b).
@@ -353,17 +362,45 @@ Passos:
    DELETE da sessão → 200; o `/mcp` do Spring AI continuou respondendo ao lado.
    Achado: o `McpAsyncServer` força `logging` nas capacidades (`.mutate().logging()` no construtor). Anunciamos `tools` e
    `logging`; resources, prompts e completions saem.
-2. ⬜ Chaves na configuração. `gate.security.keys` lido na subida; falha a subida se um `value` estiver vazio ou repetido.
+2. ✅ Chaves na configuração. `gate.security.keys` lido na subida; falha a subida se um `value` estiver vazio ou repetido.
    O valor nunca aparece em log, em `toString()` nem em resposta do `/admin`. Comparação em tempo constante (`MessageDigest.isEqual`).
    Pronto quando: subir sem `GATE_KEY_CLI` definida falha com mensagem clara dizendo qual chave está vazia.
-3. ⬜ Um servidor por chave no `/mcp`, no lugar do servidor do Spring AI (`spring.ai.mcp.server.enabled: false`), a partir do protótipo.
+   Feito (2026-10-26): `config/SecurityProperties` (record; `Key.toString` esconde o valor; `upstreams` padrão `[]`, `admin`
+   padrão `false`) valida no construtor: sem chaves, valor vazio ("A chave de acesso 'cli' está sem valor
+   (gate.security.keys.cli.value); confira a variável de ambiente dela") e valor repetido (cita os nomes, nunca o valor).
+   No yml, `${GATE_KEY_CLI:}`/`${GATE_KEY_PANEL:}` com padrão vazio, para a falha vir da nossa validação e não do placeholder.
+   `security/AccessKeys.find(valor)` devolve um `AccessKey(name, upstreams, admin)` sem o valor; compara SHA-256 dos dois lados
+   com `MessageDigest.isEqual` (o tamanho não vaza) e passa por todas as chaves. Na subida loga só os nomes.
+   O teste de contexto passa chaves por `@SpringBootTest(properties = ...)`. Testes: `SecurityPropertiesTest`, `AccessKeysTest`.
+   **Bug da fase 3 achado aqui:** com o autoconfig do cliente desligado, ninguém fechava os clientes no fim do contexto. Numa falha
+   de subida a JVM não saía (threads do transporte STDIO) e os `npx` sobravam. Agora `UpstreamRegistry.close()` (`@PreDestroy`)
+   fecha todos e para as reconexões. Conferido: sem a variável, a subida falha e o processo sai em 13s sem sobrar upstream;
+   `kill` no java da 8081 também leva os `npx` junto.
+3. ✅ Um servidor por chave no `/mcp`, no lugar do servidor do Spring AI (`spring.ai.mcp.server.enabled: false`), a partir do protótipo.
    O `ToolMirror` põe cada tool só nos servidores das chaves que liberam aquele upstream (`upstreams` da configuração; a regra
    "chave X vê upstream Y" fica num lugar só em `security/`). Tool fora da chave: `-32602 Unknown tool`, igual a inexistente.
    Subida, reconexão e `list_changed` dos upstreams continuam pelo mesmo `apply`, agora para cada servidor.
    Pronto quando: com uma chave `fs` (`upstreams: ["filesystem"]`), o `tools/list` tem só as 14 `filesystem__`, e chamar
    `notion__API-get-self` com ela falha; com a `cli` (`"*"`), as 38 aparecem e a chamada funciona; a fase 3 continua valendo
    (Notion cai e volta só nos servidores que o veem).
-4. ⬜ Autenticação em `/mcp` e `/admin/**` (Spring Security, filtro em `security/`). Sem header ou com valor errado → 401
+   Feito (2026-10-26): `spring.ai.mcp.server.enabled: false`; `config/McpServerConfig` liga `McpServerProperties` e
+   `McpServerStreamableHttpProperties` (o yml do servidor continua valendo). `proxy/KeyServers` monta um `McpSyncServer` +
+   transporte por chave (`AccessKeys.all()`), com o mesmo `JsonMapper` que o Spring AI montava, só a capacidade de tools e
+   `immediateExecution(true)`; `addTool(upstream, spec)`/`removeTool(upstream, nome)` vão só para as chaves com
+   `AccessKey.canSee(upstream)` (a regra, em `security/`). Upstream citado numa chave e ausente do yml: WARN na subida.
+   `proxy/McpEndpointConfig` é a única rota do /mcp (substitui o protótipo, apagado): `Bearer` → `AccessKeys.find` →
+   transporte da chave; sem chave válida, 401 com `WWW-Authenticate: Bearer` (o passo 4 troca isso pelo Spring Security).
+   O `ToolMirror` e o `ToolRouter` (uma rota por tool, para todas as chaves) quase não mudaram; o log agora é por chave.
+   Testes novos: `KeyServersTest`, `McpEndpointConfigTest` (401 e sessão de uma chave dando 404 na outra), `AccessKeyTest`.
+   Testado na 8081 com `cli`, `painel` e uma `fs` (`upstreams: filesystem`) pela linha de comando: na subida
+   `{cli=38, fs=14, painel=38}`; `initialize` anuncia `logging` + `tools`; `fs` chama `notion__API-get-self` → `-32602 Unknown
+   tool`, `filesystem__list_allowed_directories` funciona; `cli` chega na API do Notion; sessão do `cli` com chave `fs` → 404;
+   sem chave → 401. Fase 3: Notion morto → DOWN em 4s, `cli` 14 tools e 24 `list_changed`, `fs` 14 e nenhum aviso; voltou
+   em 24s, `cli` 38 (48 avisos), `fs` intacta.
+   **Achado:** com stream SSE aberto, o desligamento levava 30s (o graceful shutdown do Tomcat esperava o stream, e o
+   `@PreDestroy` só fechava os servidores depois). O `KeyServers` virou `SmartLifecycle` na fase mais alta e fecha os
+   servidores antes do Tomcat: o java sai em ~0,4s e o servidor fecha o stream.
+4. ✅ Autenticação em `/mcp` e `/admin/**` (Spring Security, filtro em `security/`). Sem header ou com valor errado → 401
    (com `WWW-Authenticate: Bearer`), sem dizer qual parte falhou. O roteador do passo 3 lê a chave autenticada.
    O preflight de CORS (`OPTIONS`) passa sem chave, e o CORS do `/admin` precisa liberar o header `Authorization`.
    `/actuator/health` continua aberto. Remover o `server.address: 127.0.0.1` só depois deste passo, e só se quiser.
@@ -371,7 +408,35 @@ Passos:
    Pronto quando: os curls de "Testes rápidos" dão 401 sem chave e 200 com `-H "Authorization: Bearer $GATE_KEY_CLI"`; a chave `cli`
    dá 403 no `/admin/upstreams` e a `painel` dá 200; o Claude Code conecta com
    `claude mcp add --transport http gate-of-truth http://localhost:8080/mcp --header "Authorization: Bearer $GATE_KEY_CLI"`.
-5. ⬜ Testes: autenticação (401/403/200, preflight sem chave), propriedades (chave vazia ou repetida falha) e filtro por chave.
+   Feito (2026-10-26): `spring-boot-starter-security` (+ `-security-test`). `security/AccessKeyFilter` (não é bean, senão o Boot
+   o registraria de novo fora do Spring Security) lê o `Bearer`, acha a chave em `AccessKeys.find` e põe um
+   `security/AccessKeyAuthentication` (principal = `AccessKey`, `ROLE_ADMIN` se `admin: true`) no contexto; sem chave válida o
+   pedido segue anônimo e a regra dá 401. Roda também nos dispatches ASYNC e ERROR (o SSE termina num ASYNC e não há sessão
+   HTTP). `config/SecurityConfig`: sem sessão, CSRF, login, basic e logout; `/actuator/health` e `/error` abertos,
+   `/admin/**` com `hasRole(ADMIN)`, o resto autenticado (rota desconhecida sem chave também dá 401, não 404). 401 com
+   `WWW-Authenticate: Bearer` e 403, os dois sem corpo. `UserDetailsServiceAutoConfiguration` excluído no yml (senão o Boot
+   gera usuário e senha). O `McpEndpointConfig` lê a chave por `AccessKeyAuthentication.current()`. CORS do `/admin` libera
+   `Authorization` e `Content-Type` explicitamente; o preflight passa sem chave. Os `@WebMvcTest` do `/admin` importam
+   `SecurityConfig` + `AccessKeys` e mandam a chave do painel.
+   Testado na 8081 (perfil `local` + chave `fs`): `/mcp` sem chave, chave errada ou `Basic` → 401 Bearer; `cli`/`painel` → 200;
+   `/admin/upstreams` sem chave → 401, `cli`/`fs` → 403 (o playground também), `painel` → 200; preflight de
+   `localhost:4200` sem chave → 200 com `Access-Control-Allow-Headers: authorization`, outra origem → 403;
+   `/actuator/health` 200, `/actuator/info` 401; nenhum `Set-Cookie`. Pelo `/mcp`: `cli` 38 tools, `fs` 14, `fs` chamando
+   `notion__` → `-32602`, sessão do `cli` com chave `fs` → 404 e sem chave → 401, stream GET aberto, DELETE 200. Notion morto:
+   24 `list_changed` no stream do `cli`, 0 no do `fs`. Desligamento continua em ~0,4s.
+   Obs.: sessão sem stream GET aberto (ex.: as de curl) gera um ERROR "Stream unavailable for session" do SDK por notificação;
+   é do SDK, não da autenticação.
+5. ✅ Testes: autenticação (401/403/200, preflight sem chave), propriedades (chave vazia ou repetida falha) e filtro por chave.
+   Feito (2026-10-26): `config/SecurityConfigTest` (`@SpringBootTest` + MockMvc, contexto inteiro com os servidores por chave de
+   verdade e o `UpstreamRegistry` mock, sem subir upstream): `/mcp` dá 401 + `WWW-Authenticate: Bearer` sem corpo para sem header,
+   valor errado, `Bearer ` vazio, sem esquema, `Basic`, `bearer` minúsculo e valor com espaço a mais; com chave abre sessão sem
+   `Set-Cookie`; sessão do `cli` dá 404 com a `fs` e 401 sem chave; `/admin` 401 sem chave, 403 sem corpo para `cli`/`fs`
+   (inclusive o playground), 200 para `painel`; preflight do painel sem chave; `/mcp` sem CORS; `/actuator/health` aberto e
+   `/actuator/info` não; rota desconhecida 401 sem chave e 404 com. `sseResponseSurvivesAsyncDispatch` cobre a resposta SSE do
+   `tools/list` (dispatch ASYNC): conferido que ele quebra se o filtro deixar de rodar no ASYNC ("response is already
+   committed"). `security/AccessKeyAuthenticationTest`: `ROLE_ADMIN` só para `admin: true`, sem credencial, `current()`.
+   Propriedades e filtro por chave já estavam cobertos (`SecurityPropertiesTest`, `AccessKeysTest`, `KeyServersTest`,
+   `McpEndpointConfigTest`). Total: 69 testes.
 
 Cuidados:
 - Chave nunca no código, no yml commitado nem em log. `.env` ou variável no IntelliJ; no Windows, variável de ambiente do usuário.
@@ -379,33 +444,190 @@ Cuidados:
 - Quando um upstream reconecta e as tools voltam, o filtro por chave continua valendo (ele olha a chave do upstream, não a lista fixa).
 - Fora da fase 4: OAuth, cadastro de chaves pelo painel (etapa B), auditoria de quem chamou o quê (fase 5).
 
-## Notas para depois
-- O servidor anuncia capacidades de resources, prompts e completions sem ter nenhum; resolvido na fase 4 (servidores montados na mão: só tools e logging, que o SDK força).
+## Concluído: fase 5, auditoria e métricas (sem banco) (2026-10-27)
+Objetivo: saber quem chamou o quê, quando, quanto demorou e se deu certo, tanto pelo `/mcp` quanto pelo playground do `/admin`.
+Pronto quando: cada chamada de tool gera uma linha de auditoria com o nome da chave; `/actuator/metrics` mostra contagem e tempo
+por chave, upstream, tool e resultado; `GET /admin/calls` devolve as últimas chamadas, mais recentes primeiro.
+
+Decidido (2026-10-26): **sem banco nesta fase.** Tudo que precisa de banco (etapa B do painel, OAuth) fica para o fim.
+As últimas chamadas ficam em memória e somem ao reiniciar; o histórico que sobrevive é o arquivo de log.
+Quando o banco entrar, só o armazenamento das chamadas troca: por isso ele fica numa classe só, `audit/CallLog`, e mais ninguém
+guarda chamadas. É nessa hora (segunda implementação) que nasce a interface, não antes.
+
+Registro de uma chamada (`audit/CallRecord`, record): `at` (Instant), `caller` (nome da chave, nunca o valor), `via` (`mcp` ou
+`admin`), `client` (nome que o cliente MCP declara, ex.: `claude-code`; `null` no `/admin`), `tool` (nome exposto), `upstream` (chave do yml), `durationMs`, `outcome` e `error` (mensagem curta, só quando falhou).
+`outcome`: `OK`, `TOOL_ERROR` (o upstream respondeu `isError: true`), `TIMEOUT`, `UNAVAILABLE` (upstream DOWN) ou `FAILURE` (exceção).
+**Os argumentos nunca entram** (podem ter conteúdo de página, caminho de arquivo, token): nem no log, nem na métrica, nem no `/admin/calls`.
+
+Passos:
+0. ✅ Investigar antes de codar (anotar aqui):
+   a) De onde vem o `caller` no `ToolRouter.call`: `AccessKeyAuthentication.current()` lido na thread da requisição, antes do
+      `UpstreamExecutor` (vale para `/mcp` e `/admin`, ver fase 4, item 0b), ou um handler por servidor no `KeyServers` (cada um
+      sabe a sua chave). Preferir passar o `caller` como parâmetro explícito do `call`, para o router não depender de thread.
+   b) O Spring AI 2.0 ou o MCP SDK 2.0 já publicam alguma observação/métrica de chamada de tool no lado servidor? Se sim, não duplicar.
+   c) Log estruturado no Boot 4.1: `logging.structured.format.file` (ecs/logstash) serve para mandar só o logger `gate.audit`
+      para um arquivo JSON separado sem dependência nova? Se não, um `logback-spring.xml` com um appender só para ele.
+   Feito (2026-10-26), lido nas fontes do MCP SDK 2.0.0, do Spring AI 2.0.1, do Spring Security 7.1.1 e do Boot 4.1.1:
+   a) Os dois caminhos funcionam, e dá para ter `caller` explícito nos dois sem depender de thread:
+      - `/mcp`: hoje o `ToolMirror` monta **uma** `SyncToolSpecification` (`(exchange, request) -> router.call(request)`) e o
+        `KeyServers.addTool` põe a mesma em todos os servidores. O `exchange` não diz de qual servidor veio (`sessionId`,
+        `getClientInfo`, `transportContext`, que está vazio porque o transporte não tem `contextExtractor`). Mas a
+        `SyncToolSpecification` é um record (`tool`, `callHandler`), então o `KeyServers` pode montar uma por servidor,
+        fechando o nome da chave daquele servidor: `addTool(upstream, tool, (caller, request) -> ...)`. É a decisão da fase 4
+        ("cada servidor guarda o nome da sua chave") virando o `caller`. Alternativas descartadas: `AccessKeyAuthentication.current()`
+        no handler (funciona só porque `immediateExecution(true)` deixa o handler na thread da requisição) e um
+        `contextExtractor` por transporte pondo o nome no `McpTransportContext` (funciona, mas é mapa de string).
+      - `/admin`: o controller recebe `@AuthenticationPrincipal AccessKey key` (o principal da `AccessKeyAuthentication` já é a
+        `AccessKey`; o resolver vem do `@EnableWebSecurity` que o Boot põe, e o nosso `SecurityFilterChain` não o desliga).
+        Continua sem lógica: só repassa `key.name()`.
+      - Então: `ToolRouter.call(String caller, Via via, CallToolRequest)` com `Via` = `MCP`/`ADMIN` em `routing/`; o router nunca
+        lê o `SecurityContext`. Bônus, se quiser: `exchange.getClientInfo()` dá o nome do cliente MCP (ex.: `claude-code`), só no `/mcp`.
+   b) Não há nada a duplicar. O MCP SDK 2.0 não tem Micrometer nem observação (nenhuma classe; o único "observation" é um valor
+      de exemplo no `contextWrite` do `StdioClientTransport`), e os módulos do servidor MCP do Spring AI também não. O
+      `ToolCallingObservation` do Spring AI (`spring-ai-model`, `gen_ai.client.operation`/`spring.ai.tool`) só existe no
+      `DefaultToolCallingManager`, o caminho do `ChatClient` com `ToolCallback`, que o gateway não usa (handlers direto no SDK e
+      `toolcallback.enabled: false`). O que já existe é o `http.server.requests` do Boot, que junta todo `POST /mcp` num lugar
+      só, sem tool, chave nem resultado. Micrometer 1.17.1 já está no classpath pelo actuator.
+   c) Só com propriedade, não. `logging.structured.format.file` (ecs, logstash, gelf) vale para o arquivo único do Boot
+      (`logging.file.name`), com todos os loggers; não há roteamento por logger. Precisa de um `logback-spring.xml`, mas
+      **sem dependência nova**: o encoder do Boot (`org.springframework.boot.logging.logback.StructuredLogEncoder`,
+      `<format>ecs</format>` ou `logstash`) funciona fora das propriedades (ele pega o `Environment` que o Boot põe no contexto
+      do logback). Os campos entram pela API fluente do SLF4J (`log.atInfo().addKeyValue("caller", ...)`): os formatters ECS e
+      Logstash escrevem os key-value pairs no JSON. Montagem: o `logback-spring.xml` inclui `defaults.xml`,
+      `console-appender.xml` e `file-appender.xml` do Boot (para o console e o `logging.file.name` não mudarem), e acrescenta um
+      `RollingFileAppender` com esse encoder, embrulhado num `AsyncAppender`, só para o logger `gate.audit` com
+      `additivity="false"`; o caminho vem de `<springProperty>` (ex.: `gate.audit.file`, padrão `logs/audit.json`).
+      A conferir no passo 2: o formato exato da linha e se o `AsyncAppender` mantém os key-value pairs.
+   **Decidido (2026-10-26):** o `AsyncAppender` da auditoria leva `discardingThreshold=0` (o padrão descarta INFO com a fila
+   acima de 80%, perda silenciosa). O `caller` vem de uma `SyncToolSpecification` por servidor no `KeyServers` e do
+   `@AuthenticationPrincipal` no `/admin`. O `exchange.getClientInfo().name()` entra como campo `client` (só no `/mcp`; `null`
+   no `/admin`) no log e no `/admin/calls`, **nunca como tag de métrica** (o cliente escreve o que quiser, sem limite de valores).
+1. ✅ Evento por chamada. `ToolRouter.call(caller, via, request)` mede o tempo, classifica o `outcome` e publica
+   `routing/ToolCalledEvent(CallRecord...)` (ou os campos) em toda chamada, inclusive as que falham. `routing` não conhece `audit`,
+   igual ao `upstream` não conhecer o `proxy` na fase 3.
+   Pronto quando: teste do router mostra o evento certo para OK, `isError`, timeout, upstream DOWN e exceção.
+   Feito (2026-10-26): `routing/Via` (`MCP`, `ADMIN`), `routing/Outcome` e `routing/ToolCalledEvent(at, caller, via, tool,
+   upstream, durationMs, outcome, error)`. `ToolRouter.call(caller, via, request)` pega `at` do `Clock`, mede com `nanoTime`,
+   classifica e publica; publicar nunca quebra a chamada (exceção de quem escuta vira WARN e o resultado vai igual).
+   `error` só leva as mensagens do próprio gateway (TIMEOUT, UNAVAILABLE, FAILURE, iguais às do resultado); em TOOL_ERROR fica
+   `null`, porque o texto do erro vem do upstream e pode repetir os argumentos. Rota que sumiu entre o cliente ver a tool e
+   chamar = UNAVAILABLE com `upstream` `null`.
+   `caller` (decidido no 0a): o `KeyServers.addTool(upstream, tool, (caller, request) -> ...)` monta uma
+   `SyncToolSpecification` por servidor, fechando o nome da chave dele; o `ToolMirror` passa
+   `(caller, request) -> router.call(caller, Via.MCP, request)`. No playground, `@AuthenticationPrincipal AccessKey` no
+   `ToolCallController`. Nome do cliente MCP (`exchange.getClientInfo()`) ficou de fora.
+   Testes: `ToolRouterTest` (um evento por caso: OK, TOOL_ERROR sem o conteúdo nem os argumentos, TIMEOUT com a duração,
+   UNAVAILABLE, FAILURE, rota sumida, listener quebrado) e `routing/CallerIntegrationTest` (MockMvc com o contexto inteiro e
+   `@RecordApplicationEvents`: `tools/call` com a chave `fs` → evento com `caller` `fs`/`MCP`; playground com `painel` →
+   `painel`/`ADMIN`). 73 testes.
+   **Achado:** o Spring 7 pausa o contexto em cache entre classes de teste (`SmartLifecycle.isPauseable()`, padrão `true`),
+   e o `stop()` do `KeyServers` fechava os servidores MCP de vez (a classe seguinte recebia 503). O `KeyServers` agora é
+   `isPauseable() = false`: só para no fim do contexto.
+2. ✅ Log de auditoria. `audit/AuditLog` escuta o evento e escreve uma linha estruturada no logger `gate.audit`
+   (arquivo próprio, ex.: `logs/audit.json`, via propriedade).
+   Pronto quando: uma chamada pelo Claude Code (chave `cli`) e uma pelo playground (chave `painel`) geram uma linha cada,
+   com `caller` e `via` certos e sem argumentos.
+   Feito (2026-10-26): `audit/AuditLog` (`@EventListener` do `ToolCalledEvent`, captura tudo e só loga WARN) escreve no logger
+   `gate.audit` pela API fluente do SLF4J: `at`, `caller`, `via` (`mcp`/`admin`), `tool`, `upstream`, `durationMs`, `outcome` e
+   `error` (só quando o evento tem). Mensagem: "cli chamou filesystem__read_file via mcp: OK em 12ms".
+   `src/main/resources/logback-spring.xml`: console igual ao padrão do Boot (`defaults.xml` + `console-appender.xml`) e, só
+   para `gate.audit` (`additivity="false"`, então não aparece no console), um `AsyncAppender` (`neverBlock`,
+   `discardingThreshold` 0) na frente de um `RollingFileAppender` com o `StructuredLogEncoder` do Boot em `ecs` (rola por dia e
+   10MB, 30 dias, teto 1GB). Caminho: `gate.audit.file` (padrão `logs/audit.json`, relativo ao diretório de onde sobe;
+   `logs/` no `.gitignore`). Nos testes, o surefire aponta para `target/audit-test.json`.
+   Linha real (confere o 0c): `{"@timestamp":...,"log":{"level":"INFO","logger":"gate.audit"},"process":{...},"service":
+   {"name":"mcp-gate-of-truth",...},"message":"...","at":"...","caller":"cli","via":"mcp","tool":"...","upstream":"...",
+   "durationMs":12,"outcome":"OK","ecs":{"version":"8.11"}}`: os key-value pairs ficam na raiz e o `AsyncAppender` os mantém.
+   **Atenção:** com o `logback-spring.xml`, o `logging.file.name` deixa de valer (o Boot não monta mais o log sozinho);
+   hoje ninguém usa. Se precisar, incluir o `file-appender.xml` do Boot ali.
+   Testes: `audit/AuditLogTest` (campos, `error` só em falha, TOOL_ERROR sem `error`, evento quebrado não escapa) e o
+   `CallerIntegrationTest`, que agora manda um argumento único pelo playground e lê a linha no arquivo JSON de verdade:
+   `painel`/`admin`, logger `gate.audit`, sem o argumento. 77 testes.
+   Testado na 8081 (perfil `local`, `--gate.upstreams.call-timeout=5s`, arquivo no scratchpad): `cli` pelo `/mcp` →
+   `list_allowed_directories` OK (59ms), `notion__API-get-self` OK (531ms), `read_text_file` de arquivo inexistente
+   TOOL_ERROR sem `error`; playground com `painel` → `admin` OK; Notion congelado → TIMEOUT em 5001ms com
+   "Upstream 'notion' não respondeu em 5s". Os argumentos marcados não aparecem no arquivo; nenhuma linha no console.
+   Conferido pelo Claude Code de verdade em 2026-10-27 (ver passo 5).
+3. ✅ Métricas (Micrometer, já vem com o actuator). `audit/CallMetrics`:
+   - `Timer` `gate.tool.calls` com tags `caller`, `via`, `upstream`, `tool`, `outcome` (dá contagem e tempo de uma vez);
+   - `Gauge` `gate.upstream.up` (1/0) e `gate.upstream.reconnect.attempts` por upstream, lidos do `UpstreamRegistry`.
+   Tags só com valores de conjunto fechado (chaves, upstreams, tools): nunca argumento, sessão ou mensagem de erro.
+   Expor `health` e `metrics` (`management.endpoints.web.exposure.include`); `/actuator/metrics` só para chave `admin: true`,
+   `/actuator/health` continua aberto. `prometheus` fica de fora por enquanto.
+   Pronto quando: `/actuator/metrics/gate.tool.calls?tag=caller:cli` mostra a contagem subindo; com a chave `cli` dá 403.
+   Feito (2026-10-26): `audit/CallMetrics` escuta o `ToolCalledEvent` (igual ao `AuditLog`: captura tudo e só loga WARN) e
+   registra o `Timer` com as cinco tags; `upstream` nulo (rota que sumiu) vira `none`. As gauges são registradas na subida,
+   uma por chave de `registry.keys()`, e leem `isConnected`/`state(key).attempts()` a cada leitura (`UpstreamRegistry.state`
+   ficou público). `management.endpoints.web.exposure.include: health, metrics`; no `SecurityConfig`, `/actuator/**` entrou
+   junto com o `/admin/**` no `hasRole(ADMIN)` (o health continua liberado antes).
+   Testes: `audit/CallMetricsTest` (tags, contagem e tempo, `none`, erro fora das tags, evento quebrado, gauges seguindo o
+   registry) e `SecurityConfigTest.metricsOnlyForAdminKey` (401 sem chave, 403 sem corpo para `cli`/`fs`, 200 para `painel`). 82 testes.
+   Testado na 8081 (perfil `local`): 3 chamadas OK + 1 TOOL_ERROR pelo `/mcp` com `cli` → `?tag=caller:cli` COUNT 4
+   (`&tag=outcome:TOOL_ERROR` → 1), playground com `painel` → `caller:painel` 1; `cli` → 403, sem chave → 401,
+   `/actuator/health` 200. Notion morto → `gate.upstream.up{upstream=notion}` 0 em 9s e 1 de novo 20s depois.
+4. ✅ Últimas chamadas em memória. `audit/CallLog`: buffer circular thread-safe (`gate.audit.recent-size`, padrão 500).
+   `GET /admin/calls?limit=50&caller=&tool=&outcome=` → `[CallRecord]`, mais recentes primeiro (DTO em `admin/`).
+   Pronto quando: depois de algumas chamadas, a lista aparece com a chave `painel`; a `cli` dá 403.
+   Feito (2026-10-26): `config/AuditProperties` (`gate.audit.file` e `recent-size`, que falha a subida se < 1) e
+   `audit/CallRecord` (os campos do `ToolCalledEvent`; sem `client`, que ficou de fora no passo 1). `audit/CallLog` escuta o
+   evento e guarda num `ArrayDeque` com `synchronized` (cheio, sai a mais antiga); `recent(limit, caller, tool, outcome)`
+   devolve as que batem, mais recentes primeiro. A ordem é a de chegada do evento, que sai no fim da chamada.
+   `admin/CallController` + `admin/CallDto` (`via` minúsculo e `outcome` como na linha de auditoria): `limit` padrão 50, acima
+   do buffer vale o buffer, < 1 dá 400; filtro vazio não filtra; `outcome` inválido dá 400. Já fica sob o `/admin/**` (só admin).
+   Testes: `audit/CallLogTest` (ordem, limite do buffer, filtros, 8 threads em paralelo) e `admin/CallControllerTest`
+   (`CallLog` de verdade com buffer 3: JSON, filtros, limit, 400, 401/403). 91 testes.
+   Testado na 8081 (perfil `local`): 3 chamadas da `cli` pelo `/mcp` (OK, TOOL_ERROR com um argumento marcado, Notion OK) e 1
+   do `painel` pelo playground → as 4, mais recentes primeiro, com `caller`/`via` certos; filtro `caller=cli&outcome=TOOL_ERROR`
+   e `limit=2` certos; o argumento não aparece; sem chave 401, `cli` 403, `outcome=XPTO` 400.
+5. ✅ Testes: classificação do `outcome` (passo 1), linha de auditoria sem argumentos, tags da métrica, buffer (limite e
+   ordem, chamadas em paralelo), `/admin/calls` com filtros e 401/403.
+   Feito (2026-10-27): os itens já vinham dos passos 1 a 4 (`ToolRouterTest`, `AuditLogTest`, `CallMetricsTest`, `CallLogTest`,
+   `CallControllerTest`). Faltava ponta a ponta com os três ouvintes juntos: `CallerIntegrationTest.callReachesRecentCallsAndMetricsWithoutArguments`
+   faz um `tools/call` com a chave `fs` e um argumento marcado e confere que a chamada aparece no `/admin/calls` e soma 1 no
+   `/actuator/metrics/gate.tool.calls?tag=caller:fs` (contagens relativas, porque o contexto é compartilhado), sem o argumento
+   em nenhum dos dois. Conferido que ele falha sem o `CallMetrics` registrado. 92 testes.
+   Conferido pelo Claude Code de verdade (2026-10-27, chave `cli`, na 8080): `notion__API-get-self` OK em 585ms apareceu no
+   `audit.json` (`caller` `cli`, `via` `mcp`, sem argumentos), no `/admin/calls` e na métrica `gate.tool.calls?tag=caller:cli`.
+
+Cuidados:
+- Auditar nunca pode quebrar nem atrasar a chamada. `@EventListener` síncrono propaga exceção para quem publicou:
+  o listener captura tudo e só loga, e não faz I/O lento (o log assíncrono do logback resolve o arquivo).
+- Health check, ping e reconexão não são chamadas de tool: não entram na auditoria (só nas gauges).
+- Chamada para tool que não existe ou fora da chave nem chega ao router (o SDK dá `-32602`): não aparece na auditoria. Aceito.
+- Valor de chave nunca aparece em lugar nenhum (só o nome).
+- Fora da fase 5: banco, Prometheus/Grafana, tela de chamadas no painel (vem depois, no CLAUDE-frontend.md).
 
 ## Próximas fases
-4b) OAuth 2.0 no lugar (ou ao lado) das API keys, via spring-ai-community/mcp-security; 5) auditoria e métricas (Micrometer).
+Ordem decidida em 2026-10-26 (o que precisa de banco fica para o fim): etapa B do painel (edição, com banco; o `CallLog` passa a
+gravar no banco); 4b) OAuth 2.0 no lugar (ou ao lado) das API keys, via spring-ai-community/mcp-security.
 
 ## Testes rápidos
 Handshake e listagem de tools no gateway:
 ```bash
-curl -i -X POST http://localhost:8080/mcp -H "Content-Type: application/json" -H "Accept: application/json, text/event-stream" \
+# desde a fase 4, todo curl do /mcp leva a chave (sem ela, 401)
+M=(-H "Authorization: Bearer $GATE_KEY_CLI")
+curl -i "${M[@]}" -X POST http://localhost:8080/mcp -H "Content-Type: application/json" -H "Accept: application/json, text/event-stream" \
   -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"curl","version":"1.0"}}}'
 # copie o Mcp-Session-Id dos headers
-# a partir da fase 4, todo curl leva -H "Authorization: Bearer $GATE_KEY_CLI" (ou $GATE_KEY_PANEL no /admin)
-curl -X POST http://localhost:8080/mcp -H "Content-Type: application/json" -H "Accept: application/json, text/event-stream" \
+curl "${M[@]}" -X POST http://localhost:8080/mcp -H "Content-Type: application/json" -H "Accept: application/json, text/event-stream" \
   -H "Mcp-Session-Id: <id>" -d '{"jsonrpc":"2.0","id":2,"method":"tools/list"}'
 # chamar uma tool (troque o nome; na fase 2, com prefixo)
-curl -X POST http://localhost:8080/mcp -H "Content-Type: application/json" -H "Accept: application/json, text/event-stream" \
+curl "${M[@]}" -X POST http://localhost:8080/mcp -H "Content-Type: application/json" -H "Accept: application/json, text/event-stream" \
   -H "Mcp-Session-Id: <id>" -d '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"notion__API-get-self","arguments":{}}}'
 ```
 
 API do painel:
 ```bash
-curl -s http://localhost:8080/admin/upstreams | jq
-curl -s http://localhost:8080/admin/upstreams/filesystem/tools | jq '.[].name'
-curl -s -X POST http://localhost:8080/admin/tools/filesystem__list_allowed_directories/call \
+# a partir da fase 4, passo 4, todo curl do /admin leva a chave do painel (só chave com admin: true; a cli dá 403)
+A=(-H "Authorization: Bearer $GATE_KEY_PANEL")
+curl -s "${A[@]}" http://localhost:8080/admin/upstreams | jq
+curl -s "${A[@]}" http://localhost:8080/admin/upstreams/filesystem/tools | jq '.[].name'
+curl -s "${A[@]}" -X POST http://localhost:8080/admin/tools/filesystem__list_allowed_directories/call \
   -H "Content-Type: application/json" -d '{}' | jq
-curl -s -o /dev/null -w "%{http_code}\n" http://localhost:8080/admin/upstreams/xpto/tools   # 404
+curl -s "${A[@]}" -o /dev/null -w "%{http_code}\n" http://localhost:8080/admin/upstreams/xpto/tools   # 404
+curl -s -o /dev/null -w "%{http_code}\n" http://localhost:8080/admin/upstreams                        # 401
 ```
+
+
 
 

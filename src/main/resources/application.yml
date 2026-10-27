@@ -5,6 +5,9 @@ server:
 spring:
   application:
     name: mcp-gate-of-truth
+  # sem usuário/senha gerados pelo Boot: a autenticação é só por chave de acesso (security/AccessKeyFilter)
+  autoconfigure:
+    exclude: org.springframework.boot.security.autoconfigure.UserDetailsServiceAutoConfiguration
   ai:
     mcp:
       client:
@@ -36,11 +39,38 @@ spring:
               env:
                 PATH: ${NODE_BIN:/usr/bin}:${PATH}
       server:
+        # desligado: o gateway monta um servidor por chave de acesso (proxy/KeyServers); as propriedades abaixo
+        # (name, version, protocol, streamable-http.*) continuam valendo
+        enabled: false
         name: MCP Gate of Truth
         version: 0.0.1
         protocol: STREAMABLE
 
+# Fase 5: health aberto; metrics (gate.tool.calls, gate.upstream.*) só para chave com admin: true (config/SecurityConfig)
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health, metrics
+
 gate:
+  # Auditoria (fase 5): uma linha JSON por chamada de tool, nesse arquivo (ver logback-spring.xml). Relativo ao diretório de onde o gateway sobe.
+  audit:
+    file: logs/audit.json
+    # quantas chamadas ficam em memória para o GET /admin/calls (somem ao reiniciar)
+    recent-size: 500
   admin:
     cors-origins:
       - http://localhost:4200
+  # Chaves de acesso (fase 4). O valor vem sempre de variável de ambiente (gerar com `openssl rand -hex 32`), nunca escrito aqui.
+  # upstreams: chaves dos upstreams que a chave vê, ou "*" para todos. admin: pode usar o /admin.
+  security:
+    keys:
+      cli:
+        value: ${GATE_KEY_CLI:}
+        upstreams: ["*"]
+        admin: false
+      painel:
+        value: ${GATE_KEY_PANEL:}
+        upstreams: ["*"]
+        admin: true
